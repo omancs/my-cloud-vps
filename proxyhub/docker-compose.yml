@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  backend:
+    build: ./backend
+    container_name: proxyhub-backend
+    restart: unless-stopped
+    environment:
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
+      - SECRET_KEY=${SECRET_KEY:-change-this-secret-key}
+      - XRAY_BINARY_PATH=/usr/local/bin/xray
+    volumes:
+      - ./data:/app/data
+      - ./backend/proxyhub.db:/app/proxyhub.db
+    ports:
+      - "8000:8000"
+    networks:
+      - proxyhub-net
+
+  frontend:
+    build: ./frontend
+    container_name: proxyhub-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - proxyhub-net
+
+networks:
+  proxyhub-net:
+    driver: bridge
