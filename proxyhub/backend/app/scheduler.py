@@ -78,8 +78,17 @@ def start_scheduler():
         id="tcp_ping_sweep",
         replace_existing=True,
     )
+    # Traffic snapshot every 10 minutes
+    from app.services.traffic_service import snapshot_traffic
+    scheduler.add_job(
+        snapshot_traffic,
+        trigger=IntervalTrigger(minutes=10),
+        id="traffic_snapshot",
+        replace_existing=True,
+    )
     scheduler.start()
     print("[Scheduler] Started")
+
 
 
 def stop_scheduler():

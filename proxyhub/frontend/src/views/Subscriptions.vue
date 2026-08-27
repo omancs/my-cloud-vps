@@ -22,10 +22,13 @@
     <n-modal v-model:show="showAdd" preset="card" title="添加订阅" style="width:480px; border-radius:12px">
       <n-form :model="form" label-placement="left" label-width="80px">
         <n-form-item label="名称">
-          <n-input v-model:value="form.name" placeholder="例：机场A" />
+          <n-input v-model:value="form.name" placeholder="留空则自动从订阅链接识别" />
         </n-form-item>
         <n-form-item label="订阅链接">
-          <n-input v-model:value="form.url" placeholder="https://..." type="textarea" :rows="3" />
+          <n-space vertical style="width:100%">
+            <n-input v-model:value="form.url" placeholder="https://..." type="textarea" :rows="3" />
+            <n-button size="small" @click="pasteUrl">📋 从剪贴板粘贴链接</n-button>
+          </n-space>
         </n-form-item>
         <n-form-item label="自动刷新">
           <n-switch v-model:value="form.auto_refresh" />
@@ -65,6 +68,16 @@ const form = ref({
   auto_refresh: true,
   interval_minutes: 360,
 })
+
+async function pasteUrl() {
+  try {
+    const text = await navigator.clipboard.readText()
+    form.value.url = text.trim()
+    message.success('已从剪贴板读取链接')
+  } catch (e) {
+    message.warning('无法读取剪贴板，请手动粘贴')
+  }
+}
 
 function statusTag(row) {
   if (!row.last_fetched) return h(NTag, { type: 'default', size: 'small' }, { default: () => '未拉取' })

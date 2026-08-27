@@ -66,7 +66,6 @@ import {
   NTabPane, useMessage,
 } from 'naive-ui'
 import { nodeApi } from '../api'
-import { parse_uri_frontend } from '../utils/parser'
 
 const message = useMessage()
 const nodes = ref([])

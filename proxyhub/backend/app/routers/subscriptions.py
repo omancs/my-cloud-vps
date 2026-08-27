@@ -37,7 +37,10 @@ async def _do_refresh(sub_id: int, db: AsyncSession):
     if not sub:
         return
     try:
-        content = await fetch_subscription(sub.url)
+        content, auto_name = await fetch_subscription(sub.url)
+        # Auto-fill name if still default/empty
+        if auto_name and (not sub.name or sub.name in ("未命名", "")):
+            sub.name = auto_name
         nodes_data = parse_subscription_content(content)
 
         # Delete old nodes from this subscription

@@ -195,9 +195,30 @@ async def _get_network_node_dicts(network_id: int, db: AsyncSession) -> list:
 
 @subscribe_router.get("/{network_id}/clash")
 async def subscribe_clash(network_id: int, db: AsyncSession = Depends(get_db)):
+    """
+    Full-featured Clash Meta subscription using the 芙芙 rule template.
+    Includes: custom user rules (injected first) + all 芙芙 rule-providers.
+    """
     from fastapi.responses import PlainTextResponse
+    from sqlalchemy import select as sa_select
+    from app.models.rule import CustomRule
+    from app.services.rule_engine import build_clash_subscription
+
     nodes = await _get_network_node_dicts(network_id, db)
-    content = export_clash(nodes)
+
+    # Load user custom rules
+    rule_result = await db.execute(
+        sa_select(CustomRule)
+        .where(CustomRule.enabled == True)
+        .order_by(CustomRule.priority.asc())
+    )
+    custom_rules = [
+        {"rule_type": r.rule_type, "pattern": r.pattern,
+         "match_type": r.match_type, "enabled": r.enabled}
+        for r in rule_result.scalars().all()
+    ]
+
+    content = build_clash_subscription(nodes, custom_rules)
     return PlainTextResponse(content, media_type="text/yaml; charset=utf-8")
 
 
@@ -207,3 +228,4 @@ async def subscribe_v2ray(network_id: int, db: AsyncSession = Depends(get_db)):
     nodes = await _get_network_node_dicts(network_id, db)
     content = export_v2ray(nodes)
     return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
+

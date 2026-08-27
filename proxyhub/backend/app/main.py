@@ -7,6 +7,7 @@ from app.scheduler import start_scheduler, stop_scheduler
 from app.routers import (
     auth_router, subscriptions_router, nodes_router,
     networks_router, subscribe_router, testing_router,
+    traffic_router, rules_router,
 )
 from app.config import settings
 
@@ -44,6 +45,8 @@ app.include_router(nodes_router)
 app.include_router(networks_router)
 app.include_router(subscribe_router)
 app.include_router(testing_router)
+app.include_router(traffic_router)
+app.include_router(rules_router)
 
 
 @app.get("/api/health")

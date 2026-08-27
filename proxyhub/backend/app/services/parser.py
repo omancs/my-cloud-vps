@@ -1,26 +1,71 @@
 """
-Subscription parser: supports Base64-encoded V2Ray subscription lists
-and Clash YAML format. Parses vmess/vless/ss/trojan/hy2 URIs.
+Subscription parser: supports Base64-encoded V2Ray subscription lists,
+Clash YAML format, multi-layer Base64, mixed-text inputs.
+Parses vmess/vless/ss/trojan/hy2 URIs.
 """
 import base64
 import json
 import re
 import urllib.parse
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 import httpx
 import yaml
 
 
-async def fetch_subscription(url: str, timeout: int = 15) -> str:
-    """Fetch raw subscription content from URL."""
+async def fetch_subscription(url: str, timeout: int = 15) -> Tuple[str, Optional[str]]:
+    """
+    Fetch raw subscription content from URL.
+    Returns (content_text, auto_detected_name).
+    auto_detected_name priority:
+      1. Content-Disposition filename
+      2. subscription-userinfo profile-name
+      3. URL domain name
+    """
     headers = {
         "User-Agent": "ClashForWindows/0.20.39",
     }
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
-        return resp.text
+
+    # Auto-detect name
+    auto_name: Optional[str] = None
+
+    # 1. Content-Disposition: attachment; filename="xxx.yaml"
+    cd = resp.headers.get("content-disposition", "")
+    m = re.search(r'filename[*]?=["\']?([^"\';\r\n]+)', cd, re.IGNORECASE)
+    if m:
+        raw = m.group(1).strip().strip('"\'')
+        # Strip extension
+        auto_name = re.sub(r'\.(yaml|yml|txt|json)$', '', raw, flags=re.IGNORECASE) or None
+
+    # 2. subscription-userinfo (some providers send profile-name header)
+    if not auto_name:
+        profile = resp.headers.get("profile-title", "") or resp.headers.get("profile-name", "")
+        if profile:
+            try:
+                # May be base64-encoded
+                auto_name = base64.b64decode(profile + "==").decode("utf-8").strip() or None
+            except Exception:
+                auto_name = profile.strip() or None
+
+    # 3. Derive from URL domain
+    if not auto_name:
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = parsed.hostname or ""
+            # Take second-level domain: api.example.com → example
+            parts = host.split(".")
+            if len(parts) >= 2:
+                auto_name = parts[-2]
+            else:
+                auto_name = host or None
+        except Exception:
+            auto_name = None
+
+    return resp.text, auto_name
+
 
 
 def _try_base64_decode(text: str) -> Optional[str]:
@@ -223,32 +268,100 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
     return nodes
 
 
-def parse_subscription_content(content: str) -> List[Dict[str, Any]]:
-    """
-    Auto-detect subscription format and parse all nodes.
-    Supports:
-    1. Clash YAML
-    2. Base64-encoded list of URIs
-    3. Plain-text list of URIs
-    """
-    nodes = []
-
-    # Try Clash YAML
-    stripped = content.strip()
-    if stripped.startswith("proxies:") or "\nproxies:" in stripped:
-        return parse_clash_yaml(stripped)
-
-    # Try base64 decode
-    decoded = _try_base64_decode(stripped)
-    lines_source = decoded if decoded else stripped
-
-    # Parse line-by-line URIs
-    for line in lines_source.splitlines():
+def _extract_uris_from_text(text: str) -> List[str]:
+    """Extract all proxy URIs from any text (handles comment lines, blank lines)."""
+    uris = []
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
         node = parse_uri(line)
         if node:
+            uris.append(line)
+    return uris
+
+
+def _multi_layer_base64_decode(text: str) -> Optional[str]:
+    """
+    Try up to 3 rounds of Base64 decoding.
+    Handles: plain Base64, URL-safe Base64, padded/unpadded variants.
+    Returns the first decoded string that contains proxy URIs.
+    """
+    candidate = text.strip()
+    # Remove potential data: URI prefix
+    candidate = re.sub(r'^data:[^;]+;base64,', '', candidate, flags=re.IGNORECASE)
+
+    for _ in range(3):
+        # Try standard and URL-safe variants
+        for variant in [candidate, candidate.replace("-", "+").replace("_", "/")]:
+            padded = variant + "=" * (-len(variant) % 4)
+            try:
+                decoded = base64.b64decode(padded).decode("utf-8")
+                # Check if it contains proxy URIs → if yes, return it
+                if any(decoded.lstrip().startswith(p) for p in
+                       ("vmess://", "vless://", "ss://", "trojan://", "hy2://",
+                        "hysteria2://", "proxies:", "socks5://")):
+                    return decoded
+                # Continue decoding if result looks like base64
+                if re.match(r'^[A-Za-z0-9+/\-_=\n\r]+$', decoded.strip()):
+                    candidate = decoded.strip()
+                    break
+            except Exception:
+                continue
+    return None
+
+
+def parse_subscription_content(content: str) -> List[Dict[str, Any]]:
+    """
+    Auto-detect subscription format and parse all nodes.
+    Supports:
+    1. Clash YAML (proxies: key)
+    2. Plain-text list of proxy URIs
+    3. Single-layer Base64-encoded list
+    4. Multi-layer / URL-safe Base64
+    5. Mixed text with embedded URIs and Base64 blocks
+    """
+    nodes = []
+    stripped = content.strip()
+
+    # 1. Clash YAML
+    if stripped.startswith("proxies:") or "\nproxies:" in stripped:
+        return parse_clash_yaml(stripped)
+
+    # 2. Try multi-layer base64 on the whole content
+    decoded = _multi_layer_base64_decode(stripped)
+    if decoded:
+        if decoded.strip().startswith("proxies:") or "\nproxies:" in decoded:
+            return parse_clash_yaml(decoded)
+        lines_source = decoded
+    else:
+        lines_source = stripped
+
+    # 3. Parse line-by-line, also trying Base64 per-line for mixed inputs
+    for line in lines_source.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Direct URI
+        node = parse_uri(line)
+        if node:
             nodes.append(node)
+            continue
+        # Try this line as standalone base64 block
+        if len(line) > 20 and re.match(r'^[A-Za-z0-9+/\-_=]+$', line):
+            inner = _multi_layer_base64_decode(line)
+            if inner:
+                for sub_line in inner.splitlines():
+                    sub_node = parse_uri(sub_line.strip())
+                    if sub_node:
+                        nodes.append(sub_node)
 
     return nodes
+
+
+def parse_text_or_base64(text: str) -> List[Dict[str, Any]]:
+    """
+    Public API: parse arbitrary user-pasted text (clipboard input).
+    Handles all formats: URIs, Base64, mixed, Clash YAML.
+    """
+    return parse_subscription_content(text)

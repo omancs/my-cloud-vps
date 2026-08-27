@@ -74,3 +74,20 @@ export const testApi = {
   full: (data) => api.post('/test/full', data),
   results: (params) => api.get('/test/results', { params }),
 }
+
+// ─── Traffic ─────────────────────────────────────────
+export const trafficApi = {
+  usage: () => api.get('/traffic/usage'),
+  config: () => api.get('/traffic/config'),
+  updateConfig: (data) => api.put('/traffic/config', data),
+}
+
+// ─── Rules ───────────────────────────────────────────
+export const rulesApi = {
+  list: () => api.get('/rules/'),
+  create: (data) => api.post('/rules/', data),
+  update: (id, data) => api.put(`/rules/${id}`, data),
+  remove: (id) => api.delete(`/rules/${id}`),
+  batchDelete: (ids) => api.delete('/rules/batch/delete', { data: ids }),
+  parseText: (text) => api.post('/rules/parse-text', { text }),
+}
