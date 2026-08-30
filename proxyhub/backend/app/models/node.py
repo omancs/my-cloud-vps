@@ -31,7 +31,9 @@ class Node(Base):
     is_residential = Column(Boolean, nullable=True)
     netflix_unlock = Column(Boolean, nullable=True)
     openai_unlock = Column(Boolean, nullable=True)
+    youtube_unlock = Column(Boolean, nullable=True)
     purity_status = Column(String(20), default="unknown")  # unknown/clean/dirty
+
 
     last_tested = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

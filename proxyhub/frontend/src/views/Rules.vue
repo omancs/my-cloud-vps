@@ -26,6 +26,7 @@
         v-model:checked-row-keys="checkedIds"
         striped
         size="small"
+        :scroll-x="600"
       />
     </n-card>
 

@@ -1,6 +1,18 @@
+import os
+from pathlib import Path
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
+
+# Ensure database directory exists
+_raw_path = settings.DATABASE_URL.replace("sqlite+aiosqlite:///", "")
+if _raw_path:
+    try:
+        _dir = os.path.dirname(os.path.abspath(_raw_path))
+        if _dir:
+            Path(_dir).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
 engine = create_async_engine(
     settings.DATABASE_URL,

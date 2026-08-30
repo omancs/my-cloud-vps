@@ -111,6 +111,7 @@ async def _run_purity(node_ids, subscription_id, db: AsyncSession):
             node.is_residential = r.get("is_residential")
             node.netflix_unlock = r.get("netflix_unlock")
             node.openai_unlock = r.get("openai_unlock")
+            node.youtube_unlock = r.get("youtube_unlock")
             node.purity_status = r.get("purity_status", "unknown")
             node.last_tested = now
             tr = TestResult(

@@ -1,16 +1,23 @@
 """
-Speed test service:
-  Layer 1: TCP Ping (asyncio connection, no proxy needed)
-  Layer 2: Real proxy speed test via xray-core subprocess
+Speed test service V2:
+  Layer 1: Fast TCP Ping (asyncio socket connection)
+  Layer 2: Real proxy speed test via dynamic xray-core subprocess
 """
 import asyncio
 import time
 import json
 import os
 import tempfile
-import subprocess
+import socket
 from typing import List, Dict, Any, Optional
 from app.config import settings
+
+
+def _find_free_port() -> int:
+    """Find a random available local port."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("", 0))
+        return s.getsockname()[1]
 
 
 # ─────────────────────────────────────────────
@@ -18,15 +25,12 @@ from app.config import settings
 # ─────────────────────────────────────────────
 
 async def tcp_ping_one(host: str, port: int, timeout: float = None) -> Optional[float]:
-    """
-    Attempt TCP connection to host:port.
-    Returns latency in ms, or None on failure.
-    """
-    timeout = timeout or settings.TCP_PING_TIMEOUT
+    """Attempt TCP connection to host:port. Returns latency in ms, or None on failure."""
+    timeout = timeout or settings.TCP_PING_TIMEOUT or 3.5
     try:
         start = time.monotonic()
         _, writer = await asyncio.wait_for(
-            asyncio.open_connection(host, port), timeout=timeout
+            asyncio.open_connection(host, int(port)), timeout=timeout
         )
         latency = (time.monotonic() - start) * 1000
         writer.close()
@@ -41,13 +45,9 @@ async def tcp_ping_one(host: str, port: int, timeout: float = None) -> Optional[
 
 async def tcp_ping_batch(
     nodes: List[Dict[str, Any]],
-    concurrency: int = None,
+    concurrency: int = 50,
 ) -> List[Dict[str, Any]]:
-    """
-    Run TCP ping on a list of node dicts [{id, address, port}].
-    Returns list of {id, latency_ms, status}.
-    """
-    concurrency = concurrency or settings.TCP_PING_CONCURRENCY
+    """Run TCP ping on a list of node dicts [{id, address, port}]."""
     semaphore = asyncio.Semaphore(concurrency)
     results = []
 
@@ -60,7 +60,7 @@ async def tcp_ping_batch(
                 "status": "ok" if latency is not None else "timeout",
             })
 
-    await asyncio.gather(*[ping_node(n) for n in nodes])
+    await asyncio.gather(*[ping_node(n) for n in nodes], return_exceptions=True)
     return results
 
 
@@ -68,19 +68,20 @@ async def tcp_ping_batch(
 # Layer 2: Real proxy speed test via xray-core
 # ─────────────────────────────────────────────
 
-def _build_xray_config(node: Dict[str, Any], local_port: int) -> Dict[str, Any]:
-    """Build a minimal xray-core inbound+outbound config for a given node."""
-    protocol = node["protocol"]
+def _build_xray_config(node: Dict[str, Any], local_port: int) -> Optional[Dict[str, Any]]:
+    """Build a minimal xray-core config for VMess, VLESS, SS, Trojan, Hysteria 2."""
+    protocol = (node.get("protocol") or "").lower()
     extra = node.get("extra") or {}
+    address = node.get("address", "")
+    port = int(node.get("port", 0) or 0)
 
-    # Build outbound based on protocol
     if protocol == "vmess":
         outbound = {
             "protocol": "vmess",
             "settings": {
                 "vnext": [{
-                    "address": node["address"],
-                    "port": node["port"],
+                    "address": address,
+                    "port": port,
                     "users": [{
                         "id": extra.get("uuid", ""),
                         "alterId": int(extra.get("alterId", 0)),
@@ -91,65 +92,71 @@ def _build_xray_config(node: Dict[str, Any], local_port: int) -> Dict[str, Any]:
             "streamSettings": {
                 "network": extra.get("network", "tcp"),
                 "security": extra.get("tls", ""),
-                "wsSettings": {"path": extra.get("path", "/"), "headers": {"Host": extra.get("host", "")}},
-                "tlsSettings": {"serverName": extra.get("sni", extra.get("host", ""))},
+                "wsSettings": {"path": extra.get("path", "/"), "headers": {"Host": extra.get("host", "")}} if extra.get("network") == "ws" else None,
+                "tlsSettings": {"serverName": extra.get("sni", extra.get("host", address)), "allowInsecure": True},
             }
         }
+        # Clean None values in streamSettings
+        outbound["streamSettings"] = {k: v for k, v in outbound["streamSettings"].items() if v is not None}
+
     elif protocol == "vless":
         outbound = {
             "protocol": "vless",
             "settings": {
                 "vnext": [{
-                    "address": node["address"],
-                    "port": node["port"],
+                    "address": address,
+                    "port": port,
                     "users": [{"id": extra.get("uuid", ""), "encryption": "none", "flow": extra.get("flow", "")}]
                 }]
             },
             "streamSettings": {
-                "network": extra.get("type", "tcp"),
+                "network": extra.get("type", extra.get("network", "tcp")),
                 "security": extra.get("security", ""),
-                "tlsSettings": {"serverName": extra.get("sni", "")},
+                "tlsSettings": {"serverName": extra.get("sni", address), "allowInsecure": True} if extra.get("security") == "tls" else None,
                 "realitySettings": {
-                    "serverName": extra.get("sni", ""),
-                    "fingerprint": extra.get("fp", ""),
+                    "serverName": extra.get("sni", address),
+                    "fingerprint": extra.get("fp", "chrome"),
                     "publicKey": extra.get("pbk", ""),
                     "shortId": extra.get("sid", ""),
-                } if extra.get("security") == "reality" else {},
+                } if extra.get("security") == "reality" else None,
             }
         }
+        outbound["streamSettings"] = {k: v for k, v in outbound["streamSettings"].items() if v is not None}
+
     elif protocol == "ss":
         outbound = {
             "protocol": "shadowsocks",
             "settings": {
                 "servers": [{
-                    "address": node["address"],
-                    "port": node["port"],
+                    "address": address,
+                    "port": port,
                     "method": extra.get("method", "aes-256-gcm"),
                     "password": extra.get("password", ""),
                 }]
             }
         }
+
     elif protocol == "trojan":
         outbound = {
             "protocol": "trojan",
             "settings": {
                 "servers": [{
-                    "address": node["address"],
-                    "port": node["port"],
+                    "address": address,
+                    "port": port,
                     "password": extra.get("password", ""),
                 }]
             },
             "streamSettings": {
                 "network": "tcp",
                 "security": "tls",
-                "tlsSettings": {"serverName": extra.get("sni", node["address"])},
+                "tlsSettings": {"serverName": extra.get("sni", address), "allowInsecure": True},
             }
         }
+
     else:
-        # Unsupported protocol for xray test
         return None
 
-    config = {
+    return {
         "log": {"loglevel": "none"},
         "inbounds": [{
             "port": local_port,
@@ -159,61 +166,70 @@ def _build_xray_config(node: Dict[str, Any], local_port: int) -> Dict[str, Any]:
         }],
         "outbounds": [outbound, {"protocol": "freedom", "tag": "direct"}],
     }
-    return config
 
 
 async def proxy_speed_test_one(
     node: Dict[str, Any],
-    local_port: int,
-    test_url: str = None,
-    timeout: int = None,
+    test_url: str = "https://www.google.com/generate_204",
+    timeout: int = 10,
 ) -> Dict[str, Any]:
-    """
-    Start a temporary xray instance, measure HTTP GET latency through it.
-    Returns {success, latency_ms, download_mbps, error}.
-    """
-    test_url = test_url or settings.PROXY_TEST_URL
-    timeout = timeout or settings.PROXY_TEST_TIMEOUT
+    """Start isolated xray instance, test HTTP latency and basic throughput."""
+    import httpx
+
     xray_bin = settings.XRAY_BINARY_PATH
-
     if not os.path.exists(xray_bin):
-        return {"success": False, "error": f"xray binary not found at {xray_bin}"}
+        # Fallback to TCP ping if xray binary is not installed
+        tcp_lat = await tcp_ping_one(node.get("address", ""), node.get("port", 0))
+        return {
+            "success": tcp_lat is not None,
+            "latency_ms": tcp_lat,
+            "download_mbps": None,
+            "error": "xray binary not found, used TCP ping",
+        }
 
+    local_port = _find_free_port()
     config = _build_xray_config(node, local_port)
     if config is None:
-        return {"success": False, "error": f"Protocol {node['protocol']} not supported for proxy test"}
+        return {"success": False, "error": f"Protocol {node.get('protocol')} not supported for deep test"}
 
-    # Write config to temp file
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config, f)
         config_path = f.name
 
     proc = None
     try:
-        # Start xray
         proc = await asyncio.create_subprocess_exec(
             xray_bin, "run", "-config", config_path,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        # Wait for xray to be ready
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.2)
 
-        # Test via socks5 proxy
-        import httpx
-        proxies = {"http://": f"socks5://127.0.0.1:{local_port}",
-                   "https://": f"socks5://127.0.0.1:{local_port}"}
+        proxies = {
+            "http://": f"socks5://127.0.0.1:{local_port}",
+            "https://": f"socks5://127.0.0.1:{local_port}",
+        }
+
+        # Step 1: Latency test with Cloudflare trace / Google 204
         start = time.monotonic()
-        async with httpx.AsyncClient(proxies=proxies, timeout=timeout) as client:
+        async with httpx.AsyncClient(proxies=proxies, timeout=timeout, follow_redirects=True) as client:
             resp = await client.get(test_url)
-            elapsed = (time.monotonic() - start) * 1000
-            content_len = len(resp.content)
-            elapsed_sec = elapsed / 1000
-            download_mbps = round((content_len * 8) / (elapsed_sec * 1_000_000), 2) if elapsed_sec > 0 else 0
+            elapsed_ms = (time.monotonic() - start) * 1000
+
+            # Step 2: Quick small throughput test (e.g. Cloudflare speed endpoint or small chunk)
+            download_mbps = None
+            try:
+                sp_start = time.monotonic()
+                chunk_resp = await client.get("https://speed.cloudflare.com/__down?bytes=500000", timeout=5)
+                sp_time = time.monotonic() - sp_start
+                if sp_time > 0 and chunk_resp.status_code == 200:
+                    download_mbps = round((len(chunk_resp.content) * 8) / (sp_time * 1_000_000), 2)
+            except Exception:
+                pass
 
         return {
             "success": True,
-            "latency_ms": round(elapsed, 2),
+            "latency_ms": round(elapsed_ms, 2),
             "download_mbps": download_mbps,
         }
     except Exception as e:
@@ -222,7 +238,7 @@ async def proxy_speed_test_one(
         if proc:
             try:
                 proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=3)
+                await asyncio.wait_for(proc.wait(), timeout=2)
             except Exception:
                 try:
                     proc.kill()
@@ -237,23 +253,15 @@ async def proxy_speed_test_one(
 async def proxy_speed_test_batch(
     nodes: List[Dict[str, Any]],
     concurrency: int = 5,
-    port_start: int = None,
 ) -> List[Dict[str, Any]]:
-    """
-    Run proxy speed tests on multiple nodes with limited concurrency.
-    Each node gets a unique local port.
-    """
-    port_start = port_start or settings.PROXY_TEST_PORT_START
+    """Run proxy speed test with controlled concurrency."""
     semaphore = asyncio.Semaphore(concurrency)
     results = []
-    port_counter = [port_start]
 
     async def test_node(node: Dict[str, Any]):
         async with semaphore:
-            port = port_counter[0]
-            port_counter[0] += 1
-            result = await proxy_speed_test_one(node, port)
-            results.append({"id": node["id"], **result})
+            res = await proxy_speed_test_one(node)
+            results.append({"id": node["id"], **res})
 
-    await asyncio.gather(*[test_node(n) for n in nodes])
+    await asyncio.gather(*[test_node(n) for n in nodes], return_exceptions=True)
     return results

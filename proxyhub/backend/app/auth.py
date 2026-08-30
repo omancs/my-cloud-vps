@@ -18,13 +18,15 @@ def get_password_hash(password: str) -> str:
     return pwd_context.hash(password)
 
 
+import os
+
 def authenticate_user(username: str, password: str) -> bool:
-    if username != settings.ADMIN_USERNAME:
-        return False
-    # For simplicity, compare plain text (hash on first run in production)
-    if password != settings.ADMIN_PASSWORD:
-        return False
-    return True
+    expected_user = os.getenv("ADMIN_USERNAME", settings.ADMIN_USERNAME).strip()
+    expected_pass = os.getenv("ADMIN_PASSWORD", settings.ADMIN_PASSWORD).strip()
+    input_user = (username or "").strip()
+    input_pass = (password or "").strip()
+    return input_user == expected_user and input_pass == expected_pass
+
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:

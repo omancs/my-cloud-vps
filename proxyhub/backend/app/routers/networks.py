@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+import secrets
+from collections import defaultdict
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from sqlalchemy.orm import selectinload
@@ -9,7 +11,10 @@ from app.database import get_db
 from app.auth import get_current_user
 from app.models.network import Network, NetworkNode
 from app.models.node import Node
-from app.services.exporter import export_clash, export_v2ray
+from app.models.rule import CustomRule
+from app.services.exporter import export_v2ray
+from app.services.rule_engine import build_clash_subscription
+from app.services.purity_test import _infer_country_from_name
 
 router = APIRouter(prefix="/api/networks", tags=["networks"])
 
@@ -18,16 +23,24 @@ class NetworkCreate(BaseModel):
     name: str
     description: Optional[str] = None
     sort_by: str = "latency"
+    auto_update: bool = False
 
 
 class NetworkUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     sort_by: Optional[str] = None
+    auto_update: Optional[bool] = None
 
 
 class AddNodeToNetwork(BaseModel):
     node_ids: List[int]
+
+
+class SmartSelectRequest(BaseModel):
+    max_total: int = 50
+    max_per_country: int = 5
+    prefer_clean: bool = True
 
 
 @router.get("/")
@@ -41,8 +54,13 @@ async def list_networks(
     networks = result.scalars().all()
     return [
         {
-            "id": n.id, "name": n.name, "description": n.description,
-            "sort_by": n.sort_by, "node_count": len(n.network_nodes),
+            "id": n.id,
+            "name": n.name,
+            "description": n.description,
+            "sort_by": n.sort_by,
+            "token": n.token,
+            "auto_update": n.auto_update,
+            "node_count": len(n.network_nodes),
             "created_at": n.created_at,
         }
         for n in networks
@@ -59,7 +77,7 @@ async def create_network(
     db.add(net)
     await db.commit()
     await db.refresh(net)
-    return {"id": net.id, "message": "网络分组已创建"}
+    return {"id": net.id, "token": net.token, "message": "网络分组已创建"}
 
 
 @router.put("/{network_id}")
@@ -77,6 +95,21 @@ async def update_network(
         setattr(net, field, value)
     await db.commit()
     return {"message": "更新成功"}
+
+
+@router.post("/{network_id}/reset-token")
+async def reset_network_token(
+    network_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    result = await db.execute(select(Network).where(Network.id == network_id))
+    net = result.scalar_one_or_none()
+    if not net:
+        raise HTTPException(status_code=404, detail="网络分组不存在")
+    net.token = secrets.token_hex(8)
+    await db.commit()
+    return {"token": net.token, "message": "订阅 Token 已重置"}
 
 
 @router.delete("/{network_id}")
@@ -109,9 +142,19 @@ async def get_network_nodes(
     nns = result.scalars().all()
     return [
         {
-            "id": nn.node.id, "name": nn.node.name, "protocol": nn.node.protocol,
-            "address": nn.node.address, "port": nn.node.port,
-            "latency_ms": nn.node.latency_ms, "status": nn.node.status,
+            "id": nn.node.id,
+            "name": nn.node.name,
+            "protocol": nn.node.protocol,
+            "address": nn.node.address,
+            "port": nn.node.port,
+            "latency_ms": nn.node.latency_ms,
+            "real_latency_ms": nn.node.real_latency_ms,
+            "download_speed": nn.node.download_speed,
+            "ip_country": nn.node.ip_country,
+            "purity_status": nn.node.purity_status,
+            "netflix_unlock": nn.node.netflix_unlock,
+            "openai_unlock": nn.node.openai_unlock,
+            "status": nn.node.status,
             "priority": nn.priority,
         }
         for nn in nns
@@ -129,7 +172,6 @@ async def add_nodes_to_network(
     if not result.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="网络分组不存在")
 
-    # Get current max priority
     existing = await db.execute(
         select(NetworkNode).where(NetworkNode.network_id == network_id)
     )
@@ -165,12 +207,116 @@ async def remove_node_from_network(
     return {"message": "已从分组移除"}
 
 
-# ─── Subscription export endpoints (no auth needed for client use) ───
+async def _execute_smart_select(network_id: int, max_total: int, max_per_country: int, db: AsyncSession) -> int:
+    """Core smart selection algorithm: pick best max_total nodes (<= max_per_country per country)."""
+    # 1. Fetch all enabled nodes
+    result = await db.execute(select(Node).where(Node.enabled == True))
+    all_nodes = result.scalars().all()
+    if not all_nodes:
+        return 0
+
+    # 2. Score each node
+    candidates = []
+    for node in all_nodes:
+        # Effective latency
+        lat = node.real_latency_ms or node.latency_ms
+        if lat is None or lat > 4000 or node.status == "timeout":
+            continue
+
+        # Country
+        country = node.ip_country or _infer_country_from_name(node.name) or "OTHER"
+        country = country.upper()
+
+        # Score calculation: lower latency is better, purity adds big boost
+        # Base latency score (0 to 100)
+        lat_score = max(0, 100 - (lat / 30.0))
+
+        # Purity bonus
+        purity_bonus = {
+            "clean": 50,
+            "partial": 25,
+            "dirty": 0,
+            "unknown": 5,
+        }.get(node.purity_status, 5)
+
+        # Unlock bonus
+        unlock_bonus = (10 if node.netflix_unlock else 0) + (10 if node.openai_unlock else 0)
+        speed_bonus = min(20, (node.download_speed or 0) * 2)
+
+        total_score = lat_score + purity_bonus + unlock_bonus + speed_bonus
+
+        candidates.append({
+            "node": node,
+            "country": country,
+            "latency": lat,
+            "score": total_score,
+        })
+
+    if not candidates:
+        return 0
+
+    # 3. Group by country and sort by score descending
+    country_groups = defaultdict(list)
+    for c in candidates:
+        country_groups[c["country"]].append(c)
+
+    for country in country_groups:
+        country_groups[country].sort(key=lambda x: x["score"], reverse=True)
+
+    # 4. Pick top N per country
+    selected_pool = []
+    for country, group in country_groups.items():
+        selected_pool.extend(group[:max_per_country])
+
+    # 5. Sort all selected candidates by overall score and take max_total
+    selected_pool.sort(key=lambda x: x["score"], reverse=True)
+    final_nodes = selected_pool[:max_total]
+
+    # 6. Replace network nodes
+    await db.execute(delete(NetworkNode).where(NetworkNode.network_id == network_id))
+    for priority, item in enumerate(final_nodes):
+        nn = NetworkNode(network_id=network_id, node_id=item["node"].id, priority=priority)
+        db.add(nn)
+    await db.commit()
+
+    return len(final_nodes)
+
+
+@router.post("/{network_id}/smart-select")
+async def smart_select_nodes(
+    network_id: int,
+    body: SmartSelectRequest,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    """Auto-select top N nodes with balanced country representation (max 5 per country)."""
+    net_result = await db.execute(select(Network).where(Network.id == network_id))
+    net = net_result.scalar_one_or_none()
+    if not net:
+        raise HTTPException(status_code=404, detail="网络分组不存在")
+
+    selected_count = await _execute_smart_select(network_id, body.max_total, body.max_per_country, db)
+    return {
+        "message": f"已智能优选并导入 {selected_count} 个节点（单国家上限 {body.max_per_country} 个）",
+        "selected_count": selected_count,
+    }
+
+
+# ─── Subscription Export Endpoints with Token Verification ───
 
 subscribe_router = APIRouter(prefix="/subscribe", tags=["subscribe"])
 
 
-async def _get_network_node_dicts(network_id: int, db: AsyncSession) -> list:
+async def _get_validated_network_nodes(network_id: int, token: Optional[str], db: AsyncSession) -> tuple:
+    net_res = await db.execute(select(Network).where(Network.id == network_id))
+    net = net_res.scalar_one_or_none()
+    if not net:
+        raise HTTPException(status_code=404, detail="Subscription not found")
+
+    # If network has a token configured, verify it
+    if net.token and token != net.token:
+        raise HTTPException(status_code=403, detail="Invalid subscription token")
+
     result = await db.execute(
         select(NetworkNode)
         .where(NetworkNode.network_id == network_id)
@@ -178,7 +324,7 @@ async def _get_network_node_dicts(network_id: int, db: AsyncSession) -> list:
         .order_by(NetworkNode.priority.asc())
     )
     nns = result.scalars().all()
-    return [
+    node_dicts = [
         {
             "id": nn.node.id,
             "name": nn.node.name,
@@ -189,43 +335,52 @@ async def _get_network_node_dicts(network_id: int, db: AsyncSession) -> list:
             "raw_config": nn.node.raw_config,
         }
         for nn in nns
-        if nn.node.enabled
+        if nn.node and nn.node.enabled
     ]
+    return net, node_dicts
 
 
 @subscribe_router.get("/{network_id}/clash")
-async def subscribe_clash(network_id: int, db: AsyncSession = Depends(get_db)):
-    """
-    Full-featured Clash Meta subscription using the 芙芙 rule template.
-    Includes: custom user rules (injected first) + all 芙芙 rule-providers.
-    """
+async def subscribe_clash(
+    network_id: int,
+    token: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
     from fastapi.responses import PlainTextResponse
-    from sqlalchemy import select as sa_select
-    from app.models.rule import CustomRule
-    from app.services.rule_engine import build_clash_subscription
 
-    nodes = await _get_network_node_dicts(network_id, db)
+    net, nodes = await _get_validated_network_nodes(network_id, token, db)
 
-    # Load user custom rules
+    # Load custom rules
     rule_result = await db.execute(
-        sa_select(CustomRule)
+        select(CustomRule)
         .where(CustomRule.enabled == True)
         .order_by(CustomRule.priority.asc())
     )
     custom_rules = [
-        {"rule_type": r.rule_type, "pattern": r.pattern,
-         "match_type": r.match_type, "enabled": r.enabled}
+        {"rule_type": r.rule_type, "pattern": r.pattern, "match_type": r.match_type, "enabled": r.enabled}
         for r in rule_result.scalars().all()
     ]
 
-    content = build_clash_subscription(nodes, custom_rules)
-    return PlainTextResponse(content, media_type="text/yaml; charset=utf-8")
+    content = build_clash_subscription(nodes, custom_rules, network_name=net.name)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{net.name}.yaml"',
+        "profile-title": net.name,
+    }
+    return PlainTextResponse(content, media_type="text/yaml; charset=utf-8", headers=headers)
 
 
 @subscribe_router.get("/{network_id}/v2ray")
-async def subscribe_v2ray(network_id: int, db: AsyncSession = Depends(get_db)):
+async def subscribe_v2ray(
+    network_id: int,
+    token: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
     from fastapi.responses import PlainTextResponse
-    nodes = await _get_network_node_dicts(network_id, db)
-    content = export_v2ray(nodes)
-    return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
 
+    net, nodes = await _get_validated_network_nodes(network_id, token, db)
+    content = export_v2ray(nodes)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{net.name}.txt"',
+        "profile-title": net.name,
+    }
+    return PlainTextResponse(content, media_type="text/plain; charset=utf-8", headers=headers)

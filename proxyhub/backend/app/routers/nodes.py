@@ -78,6 +78,7 @@ def _node_to_dict(n: Node) -> dict:
         "is_residential": n.is_residential,
         "netflix_unlock": n.netflix_unlock,
         "openai_unlock": n.openai_unlock,
+        "youtube_unlock": getattr(n, "youtube_unlock", False),
         "purity_status": n.purity_status,
         "last_tested": n.last_tested,
         "created_at": n.created_at,

@@ -1,31 +1,41 @@
 <template>
   <div>
-    <!-- Quick Actions -->
-    <n-card :bordered="false" style="border-radius:12px; margin-bottom:16px">
-      <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:center">
-        <n-text strong>快速测试（全部节点）：</n-text>
-        <n-button type="primary" :loading="running.tcp" @click="run('tcp')">⚡ TCP Ping</n-button>
-        <n-button type="info" :loading="running.proxy" @click="run('proxy')">🚀 代理测速</n-button>
-        <n-button type="warning" :loading="running.purity" @click="run('purity')">🔍 纯净度检测</n-button>
-        <n-button :loading="running.full" @click="run('full')" type="success">🔄 全量测试</n-button>
+    <!-- Testing controls -->
+    <n-card :bordered="false" style="border-radius: 12px; margin-bottom: 16px">
+      <div style="display: flex; gap: 10px; flex-wrap: wrap; align-items: center">
+        <n-text strong style="font-size: 14px">一键测试：</n-text>
+        <n-button type="primary" :loading="running.tcp" @click="run('tcp')">
+          ⚡ TCP 物理延迟
+        </n-button>
+        <n-button type="info" :loading="running.proxy" @click="run('proxy')">
+          🚀 真实代理测速
+        </n-button>
+        <n-button type="warning" :loading="running.purity" @click="run('purity')">
+          🔍 IP纯净度与流媒体解锁
+        </n-button>
+        <n-button type="success" :loading="running.full" @click="run('full')">
+          🔄 全量流水线测试
+        </n-button>
       </div>
-      <n-alert v-if="lastMsg" type="info" style="margin-top:12px" :show-icon="false">
+
+      <n-alert v-if="lastMsg" type="info" style="margin-top: 12px; border-radius: 8px" :show-icon="false">
         {{ lastMsg }}
       </n-alert>
     </n-card>
 
-    <!-- Results -->
-    <n-card title="最近测试记录" :bordered="false" style="border-radius:12px">
+    <!-- Test History Card -->
+    <n-card title="测试历史记录" :bordered="false" style="border-radius: 12px">
       <template #header-extra>
-        <n-button size="small" @click="loadResults">🔄 刷新</n-button>
+        <n-button size="small" quaternary @click="loadResults">🔄 刷新记录</n-button>
       </template>
       <n-data-table
         :columns="columns"
         :data="results"
         :loading="loading"
-        :pagination="{ pageSize: 30 }"
+        :pagination="{ pageSize: 25 }"
         size="small"
         striped
+        :scroll-x="600"
       />
     </n-card>
   </div>
@@ -47,20 +57,16 @@ const running = reactive({ tcp: false, proxy: false, purity: false, full: false 
 
 function typeTag(type) {
   const map = {
-    tcp_ping: ['default', 'TCP Ping'],
+    tcp_ping: ['primary', 'TCP Ping'],
     proxy_speed: ['info', '代理测速'],
-    purity: ['warning', '纯净度'],
+    purity: ['warning', '纯净度/解锁'],
   }
   const [t, label] = map[type] || ['default', type]
-  return h(NTag, { type: t, size: 'small' }, { default: () => label })
-}
-
-function successTag(ok) {
-  return h(NTag, { type: ok ? 'success' : 'error', size: 'small' }, { default: () => ok ? '成功' : '失败' })
+  return h(NTag, { type: t, size: 'tiny' }, { default: () => label })
 }
 
 const columns = [
-  { title: '节点ID', key: 'node_id', width: 80 },
+  { title: '节点ID', key: 'node_id', width: 70 },
   {
     title: '测试类型',
     key: 'test_type',
@@ -68,46 +74,52 @@ const columns = [
     render: (row) => typeTag(row.test_type),
   },
   {
-    title: '结果',
+    title: '状态',
     key: 'success',
-    width: 80,
-    render: (row) => successTag(row.success),
+    width: 75,
+    render: (row) => h(NTag, { type: row.success ? 'success' : 'error', size: 'tiny' }, { default: () => row.success ? '成功' : '失败' }),
   },
   {
-    title: 'TCP延迟',
+    title: '延迟 / 详情',
     key: 'latency_ms',
-    width: 100,
-    render: (row) => row.latency_ms != null ? `${Math.round(row.latency_ms)} ms` : '—',
+    render: (row) => {
+      if (row.latency_ms != null) {
+        const speed = row.download_mbps ? ` · ${row.download_mbps} Mbps` : ''
+        return `${Math.round(row.latency_ms)} ms${speed}`
+      }
+      if (row.details) {
+        const d = row.details
+        if (d.ip_country) return `[${d.ip_country}] ${d.ip_address || ''} (${d.purity_status || ''})`
+        if (d.error) return d.error
+      }
+      return '—'
+    },
   },
   {
-    title: '下载速度',
-    key: 'download_mbps',
-    width: 110,
-    render: (row) => row.download_mbps != null ? `${row.download_mbps} Mbps` : '—',
-  },
-  {
-    title: '测试时间',
+    title: '时间',
     key: 'tested_at',
-    render: (row) => new Date(row.tested_at).toLocaleString('zh-CN'),
+    width: 140,
+    render: (row) => row.tested_at ? new Date(row.tested_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—',
   },
 ]
 
 async function run(type) {
-  running[type === 'tcp' ? 'tcp' : type === 'proxy' ? 'proxy' : type === 'purity' ? 'purity' : 'full'] = true
+  const key = type === 'tcp' ? 'tcp' : type === 'proxy' ? 'proxy' : type === 'purity' ? 'purity' : 'full'
+  running[key] = true
   try {
     let res
     if (type === 'tcp') res = await testApi.tcpPing({})
     else if (type === 'proxy') res = await testApi.proxySpeed({})
     else if (type === 'purity') res = await testApi.purity({})
     else res = await testApi.full({})
+
     lastMsg.value = res.data.message
     message.success(res.data.message)
-    // Auto refresh results after delay
-    setTimeout(loadResults, 5000)
+    setTimeout(loadResults, 4000)
   } catch (e) {
     message.error('启动测试失败')
   } finally {
-    running[type === 'tcp' ? 'tcp' : type === 'proxy' ? 'proxy' : type === 'purity' ? 'purity' : 'full'] = false
+    running[key] = false
   }
 }
 

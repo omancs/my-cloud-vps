@@ -61,9 +61,12 @@ export const networkApi = {
   create: (data) => api.post('/networks/', data),
   update: (id, data) => api.put(`/networks/${id}`, data),
   remove: (id) => api.delete(`/networks/${id}`),
+  resetToken: (id) => api.post(`/networks/${id}/reset-token`),
   getNodes: (id) => api.get(`/networks/${id}/nodes`),
   addNodes: (id, nodeIds) => api.post(`/networks/${id}/nodes`, { node_ids: nodeIds }),
   removeNode: (networkId, nodeId) => api.delete(`/networks/${networkId}/nodes/${nodeId}`),
+  smartSelect: (id, data = { max_total: 50, max_per_country: 5, prefer_clean: true }) =>
+    api.post(`/networks/${id}/smart-select`, data),
 }
 
 // ─── Testing ─────────────────────────────────────────

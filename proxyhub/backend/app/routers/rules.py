@@ -115,11 +115,37 @@ async def parse_nodes_from_text(
     _: str = Depends(get_current_user),
 ):
     """
-    Parse proxy nodes from arbitrary pasted text (clipboard input).
-    Supports: URI list, Base64, multi-layer Base64, Clash YAML, mixed text.
+    Universal NekoBox-style parser:
+    1. If user pasted an HTTP/HTTPS URL -> identify as subscription URL.
+    2. Otherwise -> decode (Base64/URI/YAML) and parse into nodes.
     """
-    nodes = parse_text_or_base64(body.text)
+    raw = (body.text or "").strip()
+    # Check if single or multiple HTTP URLs
+    lines = [l.strip() for l in raw.splitlines() if l.strip()]
+    if len(lines) == 1 and (lines[0].startswith("http://") or lines[0].startswith("https://")):
+        url = lines[0]
+        # Attempt auto-name detection
+        from app.services.parser import fetch_subscription
+        auto_name = None
+        try:
+            _, auto_name = await fetch_subscription(url, timeout=5)
+        except Exception:
+            pass
+        return {
+            "type": "subscription_url",
+            "url": url,
+            "auto_name": auto_name or "新订阅源",
+            "count": 0,
+            "nodes": [],
+        }
+
+    # Otherwise parse as nodes
+    nodes = parse_text_or_base64(raw)
     return {
+        "type": "nodes",
+        "url": None,
+        "auto_name": None,
         "count": len(nodes),
         "nodes": nodes,
     }
+

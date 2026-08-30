@@ -1,7 +1,8 @@
 """
-Subscription parser: supports Base64-encoded V2Ray subscription lists,
-Clash YAML format, multi-layer Base64, mixed-text inputs.
-Parses vmess/vless/ss/trojan/hy2 URIs.
+Subscription & Node parser V3:
+  - Smart deduplication (Protocol + Address + Port + Auth/UUID/Password)
+  - NekoBox-style universal parser (URLs, Base64, Clash YAML, single/multi URIs, mixed text)
+  - Auto subscription naming & metadata extraction
 """
 import base64
 import json
@@ -14,14 +15,7 @@ import yaml
 
 
 async def fetch_subscription(url: str, timeout: int = 15) -> Tuple[str, Optional[str]]:
-    """
-    Fetch raw subscription content from URL.
-    Returns (content_text, auto_detected_name).
-    auto_detected_name priority:
-      1. Content-Disposition filename
-      2. subscription-userinfo profile-name
-      3. URL domain name
-    """
+    """Fetch raw subscription content from URL and auto-detect name."""
     headers = {
         "User-Agent": "ClashForWindows/0.20.39",
     }
@@ -29,7 +23,6 @@ async def fetch_subscription(url: str, timeout: int = 15) -> Tuple[str, Optional
         resp = await client.get(url, headers=headers)
         resp.raise_for_status()
 
-    # Auto-detect name
     auto_name: Optional[str] = None
 
     # 1. Content-Disposition: attachment; filename="xxx.yaml"
@@ -37,15 +30,13 @@ async def fetch_subscription(url: str, timeout: int = 15) -> Tuple[str, Optional
     m = re.search(r'filename[*]?=["\']?([^"\';\r\n]+)', cd, re.IGNORECASE)
     if m:
         raw = m.group(1).strip().strip('"\'')
-        # Strip extension
         auto_name = re.sub(r'\.(yaml|yml|txt|json)$', '', raw, flags=re.IGNORECASE) or None
 
-    # 2. subscription-userinfo (some providers send profile-name header)
+    # 2. subscription-userinfo profile-name
     if not auto_name:
         profile = resp.headers.get("profile-title", "") or resp.headers.get("profile-name", "")
         if profile:
             try:
-                # May be base64-encoded
                 auto_name = base64.b64decode(profile + "==").decode("utf-8").strip() or None
             except Exception:
                 auto_name = profile.strip() or None
@@ -55,28 +46,15 @@ async def fetch_subscription(url: str, timeout: int = 15) -> Tuple[str, Optional
         try:
             parsed = urllib.parse.urlparse(url)
             host = parsed.hostname or ""
-            # Take second-level domain: api.example.com → example
             parts = host.split(".")
             if len(parts) >= 2:
-                auto_name = parts[-2]
+                auto_name = parts[-2].capitalize()
             else:
                 auto_name = host or None
         except Exception:
             auto_name = None
 
     return resp.text, auto_name
-
-
-
-def _try_base64_decode(text: str) -> Optional[str]:
-    """Try to base64-decode, return None if not valid base64."""
-    try:
-        # Add padding if needed
-        padded = text + "=" * (-len(text) % 4)
-        decoded = base64.b64decode(padded).decode("utf-8")
-        return decoded
-    except Exception:
-        return None
 
 
 def parse_vmess(uri: str) -> Optional[Dict[str, Any]]:
@@ -87,17 +65,17 @@ def parse_vmess(uri: str) -> Optional[Dict[str, Any]]:
         data = json.loads(base64.b64decode(padded).decode("utf-8"))
         return {
             "protocol": "vmess",
-            "name": data.get("ps", data.get("add", "Unknown")),
-            "address": data.get("add", ""),
+            "name": str(data.get("ps", data.get("add", "VMess Node"))).strip(),
+            "address": str(data.get("add", "")).strip(),
             "port": int(data.get("port", 0)),
             "extra": {
-                "uuid": data.get("id", ""),
-                "alterId": data.get("aid", 0),
-                "network": data.get("net", "tcp"),
-                "tls": data.get("tls", ""),
-                "path": data.get("path", ""),
-                "host": data.get("host", ""),
-                "sni": data.get("sni", ""),
+                "uuid": str(data.get("id", "")).strip(),
+                "alterId": int(data.get("aid", 0)),
+                "network": str(data.get("net", "tcp")).strip(),
+                "tls": str(data.get("tls", "")).strip(),
+                "path": str(data.get("path", "")).strip(),
+                "host": str(data.get("host", "")).strip(),
+                "sni": str(data.get("sni", "")).strip(),
             },
             "raw_config": uri,
         }
@@ -109,11 +87,10 @@ def parse_vless(uri: str) -> Optional[Dict[str, Any]]:
     """Parse vless://uuid@host:port?params#name"""
     try:
         without_scheme = uri[len("vless://"):]
+        name = "VLESS Node"
         if "#" in without_scheme:
             without_scheme, name = without_scheme.rsplit("#", 1)
-            name = urllib.parse.unquote(name)
-        else:
-            name = "vless"
+            name = urllib.parse.unquote(name).strip()
         uuid, rest = without_scheme.split("@", 1)
         if "?" in rest:
             host_port, params_str = rest.split("?", 1)
@@ -123,10 +100,10 @@ def parse_vless(uri: str) -> Optional[Dict[str, Any]]:
         params = dict(urllib.parse.parse_qsl(params_str))
         return {
             "protocol": "vless",
-            "name": name,
-            "address": host,
+            "name": name or host,
+            "address": host.strip(),
             "port": int(port),
-            "extra": {"uuid": uuid, **params},
+            "extra": {"uuid": uuid.strip(), **params},
             "raw_config": uri,
         }
     except Exception:
@@ -137,11 +114,10 @@ def parse_ss(uri: str) -> Optional[Dict[str, Any]]:
     """Parse ss://... URI (SIP002 and legacy)."""
     try:
         without_scheme = uri[len("ss://"):]
-        name = ""
+        name = "Shadowsocks Node"
         if "#" in without_scheme:
             without_scheme, name = without_scheme.rsplit("#", 1)
-            name = urllib.parse.unquote(name)
-        # SIP002: ss://BASE64(method:password)@host:port
+            name = urllib.parse.unquote(name).strip()
         if "@" in without_scheme:
             userinfo, hostinfo = without_scheme.split("@", 1)
             try:
@@ -152,7 +128,6 @@ def parse_ss(uri: str) -> Optional[Dict[str, Any]]:
                 method, password = userinfo.split(":", 1)
             host, port = hostinfo.rsplit(":", 1)
         else:
-            # Legacy: ss://BASE64(method:password@host:port)
             padded = without_scheme + "=" * (-len(without_scheme) % 4)
             decoded = base64.b64decode(padded).decode("utf-8")
             method_pass, hostport = decoded.rsplit("@", 1)
@@ -161,9 +136,9 @@ def parse_ss(uri: str) -> Optional[Dict[str, Any]]:
         return {
             "protocol": "ss",
             "name": name or host,
-            "address": host,
+            "address": host.strip(),
             "port": int(port),
-            "extra": {"method": method, "password": password},
+            "extra": {"method": method.strip(), "password": password.strip()},
             "raw_config": uri,
         }
     except Exception:
@@ -174,10 +149,10 @@ def parse_trojan(uri: str) -> Optional[Dict[str, Any]]:
     """Parse trojan://password@host:port?params#name"""
     try:
         without_scheme = uri[len("trojan://"):]
-        name = ""
+        name = "Trojan Node"
         if "#" in without_scheme:
             without_scheme, name = without_scheme.rsplit("#", 1)
-            name = urllib.parse.unquote(name)
+            name = urllib.parse.unquote(name).strip()
         password, rest = without_scheme.split("@", 1)
         if "?" in rest:
             host_port, params_str = rest.split("?", 1)
@@ -188,9 +163,9 @@ def parse_trojan(uri: str) -> Optional[Dict[str, Any]]:
         return {
             "protocol": "trojan",
             "name": name or host,
-            "address": host,
+            "address": host.strip(),
             "port": int(port),
-            "extra": {"password": password, **params},
+            "extra": {"password": password.strip(), **params},
             "raw_config": uri,
         }
     except Exception:
@@ -198,13 +173,14 @@ def parse_trojan(uri: str) -> Optional[Dict[str, Any]]:
 
 
 def parse_hy2(uri: str) -> Optional[Dict[str, Any]]:
-    """Parse hy2://password@host:port?params#name (Hysteria2)."""
+    """Parse hy2://password@host:port?params#name (Hysteria 2)."""
     try:
-        without_scheme = uri[len("hy2://"):]
-        name = ""
+        prefix = "hy2://" if uri.startswith("hy2://") else "hysteria2://"
+        without_scheme = uri[len(prefix):]
+        name = "Hysteria 2 Node"
         if "#" in without_scheme:
             without_scheme, name = without_scheme.rsplit("#", 1)
-            name = urllib.parse.unquote(name)
+            name = urllib.parse.unquote(name).strip()
         auth, rest = without_scheme.split("@", 1)
         if "?" in rest:
             host_port, params_str = rest.split("?", 1)
@@ -215,9 +191,9 @@ def parse_hy2(uri: str) -> Optional[Dict[str, Any]]:
         return {
             "protocol": "hy2",
             "name": name or host,
-            "address": host,
+            "address": host.strip(),
             "port": int(port),
-            "extra": {"auth": auth, **params},
+            "extra": {"auth": auth.strip(), **params},
             "raw_config": uri,
         }
     except Exception:
@@ -235,7 +211,7 @@ PARSERS = {
 
 
 def parse_uri(uri: str) -> Optional[Dict[str, Any]]:
-    """Dispatch URI to the appropriate parser."""
+    """Dispatch URI to appropriate protocol parser."""
     uri = uri.strip()
     for prefix, parser in PARSERS.items():
         if uri.lower().startswith(prefix):
@@ -250,16 +226,15 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
         data = yaml.safe_load(content)
         proxies = data.get("proxies", []) or []
         for p in proxies:
-            ptype = p.get("type", "").lower()
+            ptype = str(p.get("type", "")).lower()
             if ptype not in ("vmess", "vless", "ss", "trojan", "hysteria2", "hy2"):
                 continue
             node = {
                 "protocol": "hy2" if ptype in ("hysteria2", "hy2") else ptype,
-                "name": p.get("name", p.get("server", "Unknown")),
-                "address": p.get("server", ""),
+                "name": str(p.get("name", p.get("server", "Clash Node"))).strip(),
+                "address": str(p.get("server", "")).strip(),
                 "port": int(p.get("port", 0)),
-                "extra": {k: v for k, v in p.items()
-                          if k not in ("name", "server", "port", "type")},
+                "extra": {k: v for k, v in p.items() if k not in ("name", "server", "port", "type")},
                 "raw_config": None,
             }
             nodes.append(node)
@@ -268,42 +243,20 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
     return nodes
 
 
-def _extract_uris_from_text(text: str) -> List[str]:
-    """Extract all proxy URIs from any text (handles comment lines, blank lines)."""
-    uris = []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        node = parse_uri(line)
-        if node:
-            uris.append(line)
-    return uris
-
-
 def _multi_layer_base64_decode(text: str) -> Optional[str]:
-    """
-    Try up to 3 rounds of Base64 decoding.
-    Handles: plain Base64, URL-safe Base64, padded/unpadded variants.
-    Returns the first decoded string that contains proxy URIs.
-    """
+    """Recursively decode up to 3 layers of Base64."""
     candidate = text.strip()
-    # Remove potential data: URI prefix
     candidate = re.sub(r'^data:[^;]+;base64,', '', candidate, flags=re.IGNORECASE)
 
     for _ in range(3):
-        # Try standard and URL-safe variants
         for variant in [candidate, candidate.replace("-", "+").replace("_", "/")]:
             padded = variant + "=" * (-len(variant) % 4)
             try:
                 decoded = base64.b64decode(padded).decode("utf-8")
-                # Check if it contains proxy URIs → if yes, return it
                 if any(decoded.lstrip().startswith(p) for p in
-                       ("vmess://", "vless://", "ss://", "trojan://", "hy2://",
-                        "hysteria2://", "proxies:", "socks5://")):
+                       ("vmess://", "vless://", "ss://", "trojan://", "hy2://", "hysteria2://", "proxies:")):
                     return decoded
-                # Continue decoding if result looks like base64
-                if re.match(r'^[A-Za-z0-9+/\-_=\n\r]+$', decoded.strip()):
+                if re.match(r'^[A-Za-z0-9+/\-_=\n\r]+$', decoded.strip()) and len(decoded.strip()) > 10:
                     candidate = decoded.strip()
                     break
             except Exception:
@@ -311,43 +264,49 @@ def _multi_layer_base64_decode(text: str) -> Optional[str]:
     return None
 
 
+def deduplicate_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Remove duplicate nodes by (protocol, address, port, auth_identifier)."""
+    seen = set()
+    unique = []
+    for n in nodes:
+        addr = str(n.get("address", "")).lower().strip()
+        port = str(n.get("port", 0))
+        proto = str(n.get("protocol", "")).lower().strip()
+        extra = n.get("extra") or {}
+        auth = str(extra.get("uuid") or extra.get("password") or extra.get("auth") or extra.get("method") or "").strip()
+        
+        fingerprint = f"{proto}:{addr}:{port}:{auth}"
+        if fingerprint not in seen and addr and port != "0":
+            seen.add(fingerprint)
+            unique.append(n)
+    return unique
+
+
 def parse_subscription_content(content: str) -> List[Dict[str, Any]]:
-    """
-    Auto-detect subscription format and parse all nodes.
-    Supports:
-    1. Clash YAML (proxies: key)
-    2. Plain-text list of proxy URIs
-    3. Single-layer Base64-encoded list
-    4. Multi-layer / URL-safe Base64
-    5. Mixed text with embedded URIs and Base64 blocks
-    """
+    """Universal parser for all subscription/node content types."""
     nodes = []
     stripped = content.strip()
 
     # 1. Clash YAML
     if stripped.startswith("proxies:") or "\nproxies:" in stripped:
-        return parse_clash_yaml(stripped)
+        nodes = parse_clash_yaml(stripped)
+        return deduplicate_nodes(nodes)
 
-    # 2. Try multi-layer base64 on the whole content
+    # 2. Base64
     decoded = _multi_layer_base64_decode(stripped)
-    if decoded:
-        if decoded.strip().startswith("proxies:") or "\nproxies:" in decoded:
-            return parse_clash_yaml(decoded)
-        lines_source = decoded
-    else:
-        lines_source = stripped
+    lines_source = decoded if decoded else stripped
+    if lines_source.strip().startswith("proxies:") or "\nproxies:" in lines_source:
+        return deduplicate_nodes(parse_clash_yaml(lines_source))
 
-    # 3. Parse line-by-line, also trying Base64 per-line for mixed inputs
+    # 3. Line-by-line parsing with per-line Base64 fallback
     for line in lines_source.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # Direct URI
         node = parse_uri(line)
         if node:
             nodes.append(node)
             continue
-        # Try this line as standalone base64 block
         if len(line) > 20 and re.match(r'^[A-Za-z0-9+/\-_=]+$', line):
             inner = _multi_layer_base64_decode(line)
             if inner:
@@ -356,12 +315,9 @@ def parse_subscription_content(content: str) -> List[Dict[str, Any]]:
                     if sub_node:
                         nodes.append(sub_node)
 
-    return nodes
+    return deduplicate_nodes(nodes)
 
 
 def parse_text_or_base64(text: str) -> List[Dict[str, Any]]:
-    """
-    Public API: parse arbitrary user-pasted text (clipboard input).
-    Handles all formats: URIs, Base64, mixed, Clash YAML.
-    """
+    """Public helper for clipboard / bulk text parsing."""
     return parse_subscription_content(text)

@@ -10,7 +10,7 @@ services:
       - XRAY_BINARY_PATH=/usr/local/bin/xray
     volumes:
       - ./data:/app/data
-      - ./backend/proxyhub.db:/app/proxyhub.db
+      - /proc/net/dev:/host_proc/net/dev:ro
     ports:
       - "8000:8000"
     networks:

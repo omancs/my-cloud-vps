@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     ADMIN_PASSWORD: str = "admin123"
 
     # Database
-    DATABASE_URL: str = "sqlite+aiosqlite:///./proxyhub.db"
+    DATABASE_URL: str = "sqlite+aiosqlite:////app/data/proxyhub.db"
 
     # Xray core binary path (for real proxy speed test)
     XRAY_BINARY_PATH: str = "/usr/local/bin/xray"
