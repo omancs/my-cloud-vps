@@ -139,13 +139,27 @@ async def delete_subscription(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(get_current_user),
 ):
+    from app.models.network import NetworkNode
+    from app.models.test_result import TestResult
+
     result = await db.execute(select(Subscription).where(Subscription.id == sub_id))
     sub = result.scalar_one_or_none()
     if not sub:
         raise HTTPException(status_code=404, detail="订阅不存在")
+
+    # Clean up associated nodes and relational references
+    nodes_res = await db.execute(select(Node.id).where(Node.subscription_id == sub_id))
+    node_ids = [r[0] for r in nodes_res.fetchall()]
+
+    if node_ids:
+        await db.execute(delete(NetworkNode).where(NetworkNode.node_id.in_(node_ids)))
+        await db.execute(delete(TestResult).where(TestResult.node_id.in_(node_ids)))
+        await db.execute(delete(Node).where(Node.id.in_(node_ids)))
+
     await db.delete(sub)
     await db.commit()
-    return {"message": "删除成功"}
+    return {"message": "订阅及其关联节点已成功删除"}
+
 
 
 @router.post("/{sub_id}/refresh")
