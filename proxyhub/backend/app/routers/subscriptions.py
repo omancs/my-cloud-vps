@@ -6,40 +6,25 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime, timezone
 
-from app.database import get_db
-from app.auth import get_current_user
-from app.models.subscription import Subscription
-from app.models.node import Node
-from app.services.parser import fetch_subscription, parse_subscription_content
+from app.database import get_db, AsyncSessionLocal
 
-router = APIRouter(prefix="/api/subscriptions", tags=["subscriptions"])
-
-
-class SubscriptionCreate(BaseModel):
-    name: str
-    url: str
-    auto_refresh: bool = True
-    interval_minutes: int = 360
-
-
-class SubscriptionUpdate(BaseModel):
-    name: Optional[str] = None
-    url: Optional[str] = None
-    auto_refresh: Optional[bool] = None
-    interval_minutes: Optional[int] = None
-    enabled: Optional[bool] = None
-
-
-async def _do_refresh(sub_id: int, db: AsyncSession):
+async def _do_refresh(sub_id: int, db_session: Optional[AsyncSession] = None):
     """Background task: fetch subscription and upsert nodes."""
+    if db_session is not None:
+        await _do_refresh_impl(sub_id, db_session)
+    else:
+        async with AsyncSessionLocal() as db:
+            await _do_refresh_impl(sub_id, db)
+
+
+async def _do_refresh_impl(sub_id: int, db: AsyncSession):
     result = await db.execute(select(Subscription).where(Subscription.id == sub_id))
     sub = result.scalar_one_or_none()
     if not sub:
         return
     try:
         content, auto_name = await fetch_subscription(sub.url)
-        # Auto-fill name if still default/empty
-        if auto_name and (not sub.name or sub.name in ("未命名", "")):
+        if auto_name and (not sub.name or sub.name in ("未命名", "", "新订阅源", "外部订阅")):
             sub.name = auto_name
         nodes_data = parse_subscription_content(content)
 
@@ -100,7 +85,7 @@ async def create_subscription(
     await db.commit()
     await db.refresh(sub)
     # Auto-fetch on creation
-    background_tasks.add_task(_do_refresh, sub.id, db)
+    background_tasks.add_task(_do_refresh, sub.id)
     return {"id": sub.id, "message": "订阅已添加，正在后台拉取节点..."}
 
 
@@ -147,5 +132,5 @@ async def refresh_subscription(
     sub = result.scalar_one_or_none()
     if not sub:
         raise HTTPException(status_code=404, detail="订阅不存在")
-    background_tasks.add_task(_do_refresh, sub_id, db)
+    background_tasks.add_task(_do_refresh, sub_id)
     return {"message": "正在后台刷新..."}

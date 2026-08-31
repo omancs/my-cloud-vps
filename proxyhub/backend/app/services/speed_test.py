@@ -170,27 +170,26 @@ def _build_xray_config(node: Dict[str, Any], local_port: int) -> Optional[Dict[s
 
 async def proxy_speed_test_one(
     node: Dict[str, Any],
-    test_url: str = "https://www.google.com/generate_204",
-    timeout: int = 10,
+    test_url: str = "http://cp.cloudflare.com/generate_204",
+    timeout: int = 8,
 ) -> Dict[str, Any]:
     """Start isolated xray instance, test HTTP latency and basic throughput."""
     import httpx
 
     xray_bin = settings.XRAY_BINARY_PATH
     if not os.path.exists(xray_bin):
-        # Fallback to TCP ping if xray binary is not installed
         tcp_lat = await tcp_ping_one(node.get("address", ""), node.get("port", 0))
         return {
             "success": tcp_lat is not None,
             "latency_ms": tcp_lat,
             "download_mbps": None,
-            "error": "xray binary not found, used TCP ping",
+            "error": "xray binary not found",
         }
 
     local_port = _find_free_port()
     config = _build_xray_config(node, local_port)
     if config is None:
-        return {"success": False, "error": f"Protocol {node.get('protocol')} not supported for deep test"}
+        return {"success": False, "error": f"Protocol {node.get('protocol')} not supported"}
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(config, f)
@@ -203,24 +202,39 @@ async def proxy_speed_test_one(
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.0)
 
         proxies = {
             "http://": f"socks5://127.0.0.1:{local_port}",
             "https://": f"socks5://127.0.0.1:{local_port}",
         }
 
-        # Step 1: Latency test with Cloudflare trace / Google 204
-        start = time.monotonic()
+        # Step 1: Multi-target Latency test
+        elapsed_ms = None
+        targets = [
+            test_url,
+            "https://www.gstatic.com/generate_204",
+            "https://1.1.1.1/cdn-cgi/trace",
+        ]
         async with httpx.AsyncClient(proxies=proxies, timeout=timeout, follow_redirects=True) as client:
-            resp = await client.get(test_url)
-            elapsed_ms = (time.monotonic() - start) * 1000
+            for target in targets:
+                try:
+                    start = time.monotonic()
+                    resp = await client.get(target)
+                    if resp.status_code in (200, 204):
+                        elapsed_ms = (time.monotonic() - start) * 1000
+                        break
+                except Exception:
+                    continue
 
-            # Step 2: Quick small throughput test (e.g. Cloudflare speed endpoint or small chunk)
+            if elapsed_ms is None:
+                return {"success": False, "error": "Connection timed out to all test targets"}
+
+            # Step 2: Quick throughput test
             download_mbps = None
             try:
                 sp_start = time.monotonic()
-                chunk_resp = await client.get("https://speed.cloudflare.com/__down?bytes=500000", timeout=5)
+                chunk_resp = await client.get("https://speed.cloudflare.com/__down?bytes=300000", timeout=4)
                 sp_time = time.monotonic() - sp_start
                 if sp_time > 0 and chunk_resp.status_code == 200:
                     download_mbps = round((len(chunk_resp.content) * 8) / (sp_time * 1_000_000), 2)
