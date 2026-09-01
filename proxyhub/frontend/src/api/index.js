@@ -53,6 +53,9 @@ export const nodeApi = {
   create: (data) => api.post('/nodes/', data),
   remove: (id) => api.delete(`/nodes/${id}`),
   batchDelete: (ids) => api.delete('/nodes/batch/delete', { data: ids }),
+  batchRename: (node_ids = null) => api.post('/nodes/batch/rename', { node_ids }),
+  batchTag: (node_ids = null) => api.post('/nodes/batch/tag', { node_ids }),
+  batchUnquarantine: (node_ids = null) => api.post('/nodes/batch/unquarantine', { node_ids }),
 }
 
 // ─── Networks ────────────────────────────────────────
@@ -72,10 +75,23 @@ export const networkApi = {
 // ─── Testing ─────────────────────────────────────────
 export const testApi = {
   tcpPing: (data) => api.post('/test/tcp-ping', data),
+  latency: (data) => api.post('/test/latency', data),
   proxySpeed: (data) => api.post('/test/proxy-speed', data),
+  bandwidth: (data) => api.post('/test/bandwidth', data),
   purity: (data) => api.post('/test/purity', data),
   full: (data) => api.post('/test/full', data),
+  getProgress: () => api.get('/test/progress'),
   results: (params) => api.get('/test/results', { params }),
+}
+
+// ─── Backup & Restore ─────────────────────────────────
+export const backupApi = {
+  exportUrl: '/api/backup/export',
+  importBackup: (file) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post('/backup/import', fd)
+  },
 }
 
 // ─── Traffic ─────────────────────────────────────────

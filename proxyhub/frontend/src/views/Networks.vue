@@ -57,12 +57,15 @@
           </div>
 
           <!-- Export buttons -->
-          <div style="display: flex; gap: 8px">
-            <n-button size="small" block type="primary" ghost @click="copySubLink(net, 'clash')">
-              📋 复制 Clash 订阅
+          <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px">
+            <n-button size="small" type="primary" ghost @click="copySubLink(net, 'clash')">
+              Clash (芙芙)
             </n-button>
-            <n-button size="small" block secondary @click="copySubLink(net, 'v2ray')">
-              📋 复制 V2Ray 订阅
+            <n-button size="small" type="info" ghost @click="copySubLink(net, 'singbox')">
+              Sing-box
+            </n-button>
+            <n-button size="small" secondary @click="copySubLink(net, 'v2ray')">
+              V2Ray
             </n-button>
           </div>
         </n-card>

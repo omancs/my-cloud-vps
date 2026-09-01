@@ -4,19 +4,18 @@ WORKDIR /app
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl wget unzip \
+    curl wget gzip ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install xray-core
+# Install Mihomo (Clash Meta) official core
 RUN ARCH=$(dpkg --print-architecture) && \
-    if [ "$ARCH" = "amd64" ]; then XRAY_ARCH="64"; \
-    elif [ "$ARCH" = "arm64" ]; then XRAY_ARCH="arm64-v8a"; \
-    else XRAY_ARCH="64"; fi && \
-    wget -q "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-${XRAY_ARCH}.zip" \
-      -O /tmp/xray.zip && \
-    unzip /tmp/xray.zip xray -d /usr/local/bin/ && \
-    chmod +x /usr/local/bin/xray && \
-    rm /tmp/xray.zip
+    if [ "$ARCH" = "amd64" ]; then MIHOMO_FILE="mihomo-linux-amd64-compatible-v1.19.29.gz"; \
+    elif [ "$ARCH" = "arm64" ]; then MIHOMO_FILE="mihomo-linux-arm64-v1.19.29.gz"; \
+    else MIHOMO_FILE="mihomo-linux-amd64-compatible-v1.19.29.gz"; fi && \
+    wget -q "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.29/${MIHOMO_FILE}" -O /tmp/mihomo.gz && \
+    gzip -d /tmp/mihomo.gz && \
+    mv /tmp/mihomo* /usr/local/bin/mihomo && \
+    chmod +x /usr/local/bin/mihomo
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt

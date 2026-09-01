@@ -12,7 +12,7 @@ from app.auth import get_current_user
 from app.models.network import Network, NetworkNode
 from app.models.node import Node
 from app.models.rule import CustomRule
-from app.services.exporter import export_v2ray
+from app.services.exporter import export_v2ray, export_singbox
 from app.services.rule_engine import build_clash_subscription
 from app.services.purity_test import _infer_country_from_name
 
@@ -333,6 +333,7 @@ async def _get_validated_network_nodes(network_id: int, token: Optional[str], db
             "port": nn.node.port,
             "extra": nn.node.extra,
             "raw_config": nn.node.raw_config,
+            "is_quarantined": getattr(nn.node, "is_quarantined", False),
         }
         for nn in nns
         if nn.node and nn.node.enabled
@@ -367,6 +368,23 @@ async def subscribe_clash(
         "profile-title": net.name,
     }
     return PlainTextResponse(content, media_type="text/yaml; charset=utf-8", headers=headers)
+
+
+@subscribe_router.get("/{network_id}/singbox")
+async def subscribe_singbox(
+    network_id: int,
+    token: Optional[str] = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    from fastapi.responses import PlainTextResponse
+
+    net, nodes = await _get_validated_network_nodes(network_id, token, db)
+    content = export_singbox(nodes)
+    headers = {
+        "Content-Disposition": f'attachment; filename="{net.name}.json"',
+        "profile-title": net.name,
+    }
+    return PlainTextResponse(content, media_type="application/json; charset=utf-8", headers=headers)
 
 
 @subscribe_router.get("/{network_id}/v2ray")

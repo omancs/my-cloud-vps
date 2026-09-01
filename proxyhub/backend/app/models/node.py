@@ -32,8 +32,10 @@ class Node(Base):
     netflix_unlock = Column(Boolean, nullable=True)
     openai_unlock = Column(Boolean, nullable=True)
     youtube_unlock = Column(Boolean, nullable=True)
-    purity_status = Column(String(20), default="unknown")  # unknown/clean/dirty
-
+    # Health & Tags
+    fail_count = Column(Integer, default=0)
+    is_quarantined = Column(Boolean, default=False)
+    tags = Column(JSON, default=list)
 
     last_tested = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

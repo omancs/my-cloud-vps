@@ -119,6 +119,28 @@
         </router-view>
       </n-layout-content>
     </n-layout>
+
+    <!-- Backup & Restore Modal -->
+    <n-modal v-model:show="showBackupModal" preset="card" title="💾 数据全量备份与一键恢复" style="max-width: 460px; width: 95vw; border-radius: 12px">
+      <div style="display: flex; flex-direction: column; gap: 16px">
+        <div>
+          <div style="font-weight: 600; margin-bottom: 4px">1. 导出全量备份数据</div>
+          <div style="font-size: 12px; color: #888; margin-bottom: 8px">将当前所有订阅源、节点库、聚合网络分组与分流规则导出为 JSON 文件保存。</div>
+          <n-button type="primary" secondary block @click="downloadBackup">
+            📥 下载 proxyhub_backup.json
+          </n-button>
+        </div>
+        <div style="border-top: 1px dashed #eee; padding-top: 14px">
+          <div style="font-weight: 600; margin-bottom: 4px">2. 还原备份数据</div>
+          <div style="font-size: 12px; color: #888; margin-bottom: 8px">上传历史导出的 JSON 备份文件，一秒恢复所有配置（将覆盖当前数据）。</div>
+          <n-upload :custom-request="handleUploadBackup" :show-file-list="false" accept=".json">
+            <n-button block type="warning">
+              📤 选择并导入 JSON 备份
+            </n-button>
+          </n-upload>
+        </div>
+      </div>
+    </n-modal>
   </n-layout>
 </template>
 
@@ -128,7 +150,7 @@ import { useRouter, useRoute } from 'vue-router'
 import {
   NLayout, NLayoutSider, NLayoutHeader, NLayoutContent,
   NMenu, NButton, NDropdown, NProgress, NPopover, NAlert,
-  NDrawer, useMessage,
+  NDrawer, NModal, NUpload, useMessage,
 } from 'naive-ui'
 import { useAuthStore } from '../store/auth'
 import { useThemeStore } from '../store/theme'
@@ -190,10 +212,55 @@ function handleMobileNav(key) {
   router.push(key)
 }
 
-const userMenuOptions = [{ label: '退出登录', key: 'logout' }]
+const userMenuOptions = [
+  { label: '💾 备份与还原', key: 'backup' },
+  { label: '退出登录', key: 'logout' },
+]
+
+const showBackupModal = ref(false)
+
+async function downloadBackup() {
+  const token = localStorage.getItem('token')
+  const res = await fetch('/api/backup/export', {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  const blob = await res.blob()
+  const url = window.URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `proxyhub_backup_${new Date().toISOString().slice(0, 10)}.json`
+  a.click()
+  window.URL.revokeObjectURL(url)
+  message.success('已导出备份文件！')
+}
+
+async function handleUploadBackup({ file }) {
+  try {
+    const fd = new FormData()
+    fd.append('file', file.file)
+    const token = localStorage.getItem('token')
+    const res = await fetch('/api/backup/import', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: fd,
+    })
+    if (res.ok) {
+      message.success('数据已成功恢复！正在刷新页面...')
+      showBackupModal.value = false
+      setTimeout(() => window.location.reload(), 1200)
+    } else {
+      const err = await res.json()
+      message.error(err.detail || '导入失败')
+    }
+  } catch (e) {
+    message.error('导入备份失败')
+  }
+}
 
 function handleUserMenu(key) {
-  if (key === 'logout') {
+  if (key === 'backup') {
+    showBackupModal.value = true
+  } else if (key === 'logout') {
     auth.logout()
     message.success('已退出登录')
     router.push('/login')

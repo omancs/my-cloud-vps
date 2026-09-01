@@ -1,226 +1,173 @@
 """
-Purity & Unlock test service V2:
+Purity & Unlock test service V3 (Mihomo Driven):
+  - Fast, resident routing through Mihomo selector (zero temporary subprocesses)
   - Multi-source GeoIP & ISP type detection (Residential vs Datacenter)
-  - Streaming unlock detection (Netflix, YouTube Premium, Disney+)
+  - Streaming unlock detection (Netflix, YouTube Premium)
   - AI services detection (OpenAI / ChatGPT)
 """
 import asyncio
-import os
-import json
-import tempfile
+import re
 import httpx
 from typing import Dict, Any, List, Optional
-from app.config import settings
-from app.services.speed_test import _build_xray_config, _find_free_port
+
+from app.services.mihomo_service import (
+    is_mihomo_installed, ensure_mihomo_running, load_proxies_to_mihomo,
+    select_proxy, MIXED_PORT
+)
+from app.services.speed_test import _reset_progress, _update_progress_step, _finish_progress
 
 
-async def _get_with_proxy(url: str, port: int, timeout: int = 8, headers: dict = None) -> Optional[httpx.Response]:
-    proxies = {
-        "http://": f"socks5://127.0.0.1:{port}",
-        "https://": f"socks5://127.0.0.1:{port}",
-    }
-    hdrs = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        **(headers or {})
-    }
-    try:
-        async with httpx.AsyncClient(proxies=proxies, timeout=timeout, follow_redirects=True, headers=hdrs) as client:
-            return await client.get(url)
-    except Exception:
-        return None
+def _infer_country_from_name(name: str) -> str:
+    n = (name or "").lower()
+    if any(k in n for k in ("hk", "hongkong", "hong kong", "香港")):
+        return "HK"
+    if any(k in n for k in ("jp", "japan", "tokyo", "osaka", "日本", "东京")):
+        return "JP"
+    if any(k in n for k in ("us", "united states", "america", "美国", "洛杉矶", "硅谷")):
+        return "US"
+    if any(k in n for k in ("sg", "singapore", "新加坡", "狮城")):
+        return "SG"
+    if any(k in n for k in ("tw", "taiwan", "台湾", "台北")):
+        return "TW"
+    if any(k in n for k in ("kr", "korea", "seoul", "韩国", "首尔")):
+        return "KR"
+    if any(k in n for k in ("uk", "gb", "britain", "london", "英国", "伦敦")):
+        return "GB"
+    if any(k in n for k in ("de", "germany", "frankfurt", "德国", "法兰克福")):
+        return "DE"
+    return "UNKNOWN"
 
 
-async def purity_test_one(node: Dict[str, Any]) -> Dict[str, Any]:
-    """Perform comprehensive IP purity & Streaming unlock test."""
-    xray_bin = settings.XRAY_BINARY_PATH
-    result: Dict[str, Any] = {
-        "success": False,
-        "ip_address": None,
-        "ip_country": None,
-        "ip_org": None,
-        "is_residential": None,
-        "netflix_unlock": False,
-        "openai_unlock": False,
-        "youtube_unlock": False,
-        "purity_status": "unknown",
-        "error": None,
-    }
+async def purity_test_batch(nodes: List[Dict[str, Any]], concurrency: int = 3) -> List[Dict[str, Any]]:
+    """Batch test IP purity & streaming unlock through resident Mihomo proxy."""
+    _reset_progress("纯净度与流媒体检测", len(nodes))
+    results = []
 
-    if not os.path.exists(xray_bin):
-        # Fallback country inference from node name
-        inferred_country = _infer_country_from_name(node.get("name", ""))
-        result["ip_country"] = inferred_country
-        result["error"] = "xray binary not found, inferred country from name"
-        return result
+    use_mihomo = is_mihomo_installed() and await ensure_mihomo_running()
 
-    local_port = _find_free_port()
-    config = _build_xray_config(node, local_port)
-    if config is None:
-        result["error"] = f"Protocol {node.get('protocol')} not supported"
-        return result
+    if not use_mihomo:
+        # Fallback: simple name inference
+        for n in nodes:
+            c = _infer_country_from_name(n.get("name", ""))
+            _update_progress_step(True)
+            results.append({
+                "id": n["id"],
+                "success": True,
+                "ip_country": c,
+                "ip_address": n.get("address"),
+                "ip_org": "Unknown (Mihomo not running)",
+                "is_residential": False,
+                "netflix_unlock": False,
+                "openai_unlock": False,
+                "youtube_unlock": False,
+                "purity_status": "datacenter",
+            })
+        _finish_progress("纯净度检测完成（未启动Mihomo，仅根据名称推断）")
+        return results
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-        json.dump(config, f)
-        config_path = f.name
+    loaded_names = await load_proxies_to_mihomo(nodes)
+    node_name_map = {n["id"]: loaded_names[i] for i, n in enumerate(nodes) if i < len(loaded_names)}
 
-    proc = None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            xray_bin, "run", "-config", config_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        await asyncio.sleep(1.2)
+    semaphore = asyncio.Semaphore(concurrency)
 
-        # ── 1. GeoIP & ISP Resolution (Multi-source fallback) ──
-        ip_data_found = False
+    async def test_node_purity(node: Dict[str, Any]):
+        async with semaphore:
+            res: Dict[str, Any] = {
+                "id": node["id"],
+                "success": False,
+                "ip_address": None,
+                "ip_country": None,
+                "ip_org": None,
+                "is_residential": None,
+                "netflix_unlock": False,
+                "openai_unlock": False,
+                "youtube_unlock": False,
+                "purity_status": "unknown",
+            }
+            pname = node_name_map.get(node["id"])
+            if not pname:
+                _update_progress_step(False)
+                results.append(res)
+                return
 
-        # Source A: api.ip.sb
-        ip_resp = await _get_with_proxy("https://api.ip.sb/geoip", local_port, timeout=6)
-        if ip_resp and ip_resp.status_code == 200:
+            # Switch selector to this proxy
+            await select_proxy(pname)
+            proxies = {
+                "http://": f"http://127.0.0.1:{MIXED_PORT}",
+                "https://": f"http://127.0.0.1:{MIXED_PORT}",
+            }
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+            }
+
             try:
-                data = ip_resp.json()
-                result["ip_address"] = data.get("ip")
-                result["ip_country"] = data.get("country_code")
-                result["ip_org"] = data.get("organization") or data.get("isp")
-                # ip.sb provides asn & org
-                org_lower = (result["ip_org"] or "").lower()
-                is_datacenter = any(k in org_lower for k in ("cloud", "hosting", "data center", "datacenter", "digitalocean", "linode", "vultr", "aws", "google", "microsoft", "oracle", "ovh", "alibaba", "tencent"))
-                result["is_residential"] = not is_datacenter
-                result["success"] = True
-                ip_data_found = True
+                async with httpx.AsyncClient(proxies=proxies, timeout=6.0, follow_redirects=True, headers=headers) as client:
+                    # 1. IP & ISP Detection (api.ip.sb or ip-api.com)
+                    try:
+                        ip_resp = await client.get("https://api.ip.sb/geoip")
+                        if ip_resp.status_code == 200:
+                            data = ip_resp.json()
+                            res["ip_address"] = data.get("ip")
+                            res["ip_country"] = data.get("country_code")
+                            res["ip_org"] = data.get("organization") or data.get("isp")
+                            org_lower = (res["ip_org"] or "").lower()
+                            is_datacenter = any(k in org_lower for k in (
+                                "cloud", "hosting", "datacenter", "data center", "digitalocean",
+                                "linode", "vultr", "aws", "google", "microsoft", "oracle", "ovh",
+                                "alibaba", "tencent", "choopa", "mserver", "leaseweb"
+                            ))
+                            res["is_residential"] = not is_datacenter
+                            res["purity_status"] = "residential" if res["is_residential"] else "datacenter"
+                            res["success"] = True
+                    except Exception:
+                        pass
+
+                    # Fallback to ip-api
+                    if not res["ip_address"]:
+                        try:
+                            ip2 = await client.get("http://ip-api.com/json")
+                            if ip2.status_code == 200:
+                                d2 = ip2.json()
+                                res["ip_address"] = d2.get("query")
+                                res["ip_country"] = d2.get("countryCode")
+                                res["ip_org"] = d2.get("org") or d2.get("isp")
+                                res["is_residential"] = False
+                                res["purity_status"] = "datacenter"
+                                res["success"] = True
+                        except Exception:
+                            pass
+
+                    # Fallback country from name
+                    if not res["ip_country"]:
+                        res["ip_country"] = _infer_country_from_name(node.get("name", ""))
+
+                    # 2. OpenAI / ChatGPT Unlock Check
+                    try:
+                        ai_resp = await client.get("https://chatgpt.com", timeout=4.0)
+                        res["openai_unlock"] = (ai_resp.status_code in (200, 307) and "unsupported" not in ai_resp.text.lower())
+                    except Exception:
+                        pass
+
+                    # 3. Netflix Check
+                    try:
+                        nf_resp = await client.get("https://www.netflix.com/title/81280792", timeout=4.0)
+                        res["netflix_unlock"] = (nf_resp.status_code == 200)
+                    except Exception:
+                        pass
+
+                    # 4. YouTube Premium Check
+                    try:
+                        yt_resp = await client.get("https://www.youtube.com/premium", timeout=4.0)
+                        res["youtube_unlock"] = (yt_resp.status_code == 200 and "not available" not in yt_resp.text.lower())
+                    except Exception:
+                        pass
+
             except Exception:
                 pass
 
-        # Source B fallback: ip-api.com
-        if not ip_data_found:
-            ip_resp2 = await _get_with_proxy("http://ip-api.com/json?fields=status,country,countryCode,org,isp,hosting,query", local_port, timeout=6)
-            if ip_resp2 and ip_resp2.status_code == 200:
-                try:
-                    data2 = ip_resp2.json()
-                    result["ip_address"] = data2.get("query")
-                    result["ip_country"] = data2.get("countryCode")
-                    result["ip_org"] = data2.get("org") or data2.get("isp")
-                    result["is_residential"] = not data2.get("hosting", True)
-                    result["success"] = True
-                    ip_data_found = True
-                except Exception:
-                    pass
+            _update_progress_step(res["success"])
+            results.append(res)
 
-        # Source C fallback: Cloudflare trace
-        if not ip_data_found:
-            cf_resp = await _get_with_proxy("https://1.1.1.1/cdn-cgi/trace", local_port, timeout=6)
-            if cf_resp and cf_resp.status_code == 200:
-                trace_lines = dict(line.split("=", 1) for line in cf_resp.text.splitlines() if "=" in line)
-                result["ip_address"] = trace_lines.get("ip")
-                result["ip_country"] = trace_lines.get("loc")
-                result["is_residential"] = False
-                result["success"] = True
-
-        # Fallback country from node name if still empty
-        if not result["ip_country"]:
-            result["ip_country"] = _infer_country_from_name(node.get("name", ""))
-
-        # ── 2. Streaming & AI Unlock Tests (Parallel) ──
-        netflix_task = _test_netflix(local_port)
-        openai_task = _test_openai(local_port)
-        youtube_task = _test_youtube(local_port)
-
-        netflix_ok, openai_ok, youtube_ok = await asyncio.gather(
-            netflix_task, openai_task, youtube_task, return_exceptions=True
-        )
-
-        result["netflix_unlock"] = bool(netflix_ok is True)
-        result["openai_unlock"] = bool(openai_ok is True)
-        result["youtube_unlock"] = bool(youtube_ok is True)
-
-        # ── 3. Calculate Overall Purity Rating ──
-        if result["success"]:
-            unlock_count = sum([result["netflix_unlock"], result["openai_unlock"], result["youtube_unlock"]])
-            if result.get("is_residential") and unlock_count >= 2:
-                result["purity_status"] = "clean"      # 原生住宅 + 多解锁
-            elif unlock_count >= 1 or result.get("is_residential"):
-                result["purity_status"] = "partial"    # 良好
-            else:
-                result["purity_status"] = "dirty"      # 机房受限
-        else:
-            result["purity_status"] = "unknown"
-
-    except Exception as e:
-        result["error"] = str(e)
-    finally:
-        if proc:
-            try:
-                proc.terminate()
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
-        try:
-            os.unlink(config_path)
-        except Exception:
-            pass
-
-    return result
-
-
-async def _test_netflix(port: int) -> bool:
-    resp = await _get_with_proxy("https://www.netflix.com/title/81280792", port, timeout=6)
-    if resp and resp.status_code == 200:
-        txt = resp.text.lower()
-        if "not available" not in txt and "geo-block" not in txt and "remind me" not in txt:
-            return True
-    return False
-
-
-async def _test_openai(port: int) -> bool:
-    resp = await _get_with_proxy("https://chatgpt.com", port, timeout=6)
-    if resp and resp.status_code in (200, 301, 302, 307, 308):
-        if "access denied" not in resp.text.lower() and "vpn" not in resp.text.lower():
-            return True
-    return False
-
-
-async def _test_youtube(port: int) -> bool:
-    resp = await _get_with_proxy("https://www.youtube.com/premium", port, timeout=6)
-    if resp and resp.status_code == 200:
-        if "premium is not available" not in resp.text.lower():
-            return True
-    return False
-
-
-def _infer_country_from_name(name: str) -> Optional[str]:
-    """Infer ISO country code from node name."""
-    import re
-    mapping = [
-        ("HK", r"港|HK|hk|Hong Kong|HongKong"),
-        ("JP", r"日本|川日|东京|大阪|泉日|埼玉|JP|Japan"),
-        ("US", r"美|洛杉矶|硅谷|西雅图|芝加哥|波特兰|US|United States"),
-        ("SG", r"新加坡|坡|狮城|SG|Singapore"),
-        ("TW", r"台湾|台|新北|彰化|TW|Taiwan"),
-        ("UK", r"英国|伦敦|UK|GB|Britain"),
-        ("KR", r"韩国|首尔|KR|Korea"),
-        ("DE", r"德国|法兰克福|DE|Germany"),
-        ("FR", r"法国|巴黎|FR|France"),
-        ("CA", r"加拿大|多伦多|CA|Canada"),
-        ("AU", r"澳大利亚|悉尼|AU|Australia"),
-    ]
-    for code, pattern in mapping:
-        if re.search(pattern, name, re.IGNORECASE):
-            return code
-    return None
-
-
-async def purity_test_batch(nodes: List[Dict[str, Any]], concurrency: int = 4) -> List[Dict[str, Any]]:
-    semaphore = asyncio.Semaphore(concurrency)
-    results = []
-
-    async def test_node(node):
-        async with semaphore:
-            res = await purity_test_one(node)
-            results.append({"id": node["id"], **res})
-
-    await asyncio.gather(*[test_node(n) for n in nodes], return_exceptions=True)
+    await asyncio.gather(*[test_node_purity(n) for n in nodes], return_exceptions=True)
+    _finish_progress(f"纯净度与流媒体检测完成：成功 {TEST_PROGRESS['alive']}/{TEST_PROGRESS['total']}")
     return results

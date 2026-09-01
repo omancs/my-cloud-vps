@@ -5,6 +5,7 @@ from app.routers.networks import router as networks_router, subscribe_router
 from app.routers.testing import router as testing_router
 from app.routers.traffic import router as traffic_router
 from app.routers.rules import router as rules_router
+from app.routers.backup import router as backup_router
 
 __all__ = [
     "auth_router",
@@ -15,5 +16,5 @@ __all__ = [
     "testing_router",
     "traffic_router",
     "rules_router",
+    "backup_router",
 ]
-

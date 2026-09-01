@@ -58,6 +58,9 @@ def _migrate_sqlite_schema(sync_conn):
         ("nodes", "ip_address", "VARCHAR(64)"),
         ("nodes", "ip_country", "VARCHAR(10)"),
         ("nodes", "ip_org", "VARCHAR(200)"),
+        ("nodes", "fail_count", "INTEGER DEFAULT 0"),
+        ("nodes", "is_quarantined", "BOOLEAN DEFAULT 0"),
+        ("nodes", "tags", "TEXT DEFAULT '[]'"),
         # subscriptions
         ("subscriptions", "node_count", "INTEGER DEFAULT 0"),
         ("subscriptions", "last_fetched", "DATETIME"),
