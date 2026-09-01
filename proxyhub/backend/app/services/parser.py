@@ -220,30 +220,142 @@ def parse_uri(uri: str) -> Optional[Dict[str, Any]]:
 
 
 def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
-    """Parse Clash YAML proxies section into node dicts."""
+    """
+    Industrial-grade Clash YAML parser:
+    1. Strips BOM and replaces tabs with spaces.
+    2. Handles dict with 'proxies' / 'Proxy' / 'payload', OR direct list of proxies.
+    3. Extracts only the proxies block first to prevent huge rules/dns syntax errors.
+    4. If PyYAML fails, uses regex block & flow-style fallback to extract nodes.
+    """
+    if not content or not content.strip():
+        return []
+
+    cleaned = content.lstrip('\ufeff').replace('\t', '  ')
     nodes = []
+
+    def _convert_proxy_dict(p: dict) -> Optional[Dict[str, Any]]:
+        if not isinstance(p, dict):
+            return None
+        ptype = str(p.get("type", "")).lower().strip()
+        if ptype in ("hysteria2", "hy2"):
+            proto = "hy2"
+        elif ptype in ("ss", "shadowsocks"):
+            proto = "ss"
+        elif ptype in ("vmess", "vless", "trojan", "tuic", "wireguard", "socks5", "http", "snell"):
+            proto = ptype
+        else:
+            return None
+
+        name = str(p.get("name") or p.get("server") or "Clash Node").strip()
+        server = str(p.get("server") or "").strip()
+        try:
+            port = int(p.get("port") or 0)
+        except Exception:
+            port = 0
+
+        if not server or port <= 0:
+            return None
+
+        extra = {k: v for k, v in p.items() if k not in ("name", "server", "port", "type")}
+        return {
+            "protocol": proto,
+            "name": name,
+            "address": server,
+            "port": port,
+            "extra": extra,
+            "raw_config": None,
+        }
+
+    # Strategy 1: Extract proxies block lines only
+    proxy_block_lines = []
+    in_proxies = False
+    base_indent = 0
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if not in_proxies:
+            if lower in ("proxies:", "proxy:", "payload:") or lower.startswith("proxies:") or lower.startswith("proxy:"):
+                in_proxies = True
+                proxy_block_lines.append(line)
+                base_indent = len(line) - len(line.lstrip())
+        else:
+            current_indent = len(line) - len(line.lstrip())
+            if stripped and not stripped.startswith("-") and not stripped.startswith("#") and current_indent <= base_indent:
+                break
+            proxy_block_lines.append(line)
+
+    if proxy_block_lines:
+        try:
+            proxies_yaml = "\n".join(proxy_block_lines)
+            data = yaml.safe_load(proxies_yaml)
+            raw_list = []
+            if isinstance(data, dict):
+                raw_list = data.get("proxies") or data.get("Proxy") or data.get("payload") or []
+            elif isinstance(data, list):
+                raw_list = data
+            for p in raw_list:
+                item = _convert_proxy_dict(p)
+                if item:
+                    nodes.append(item)
+            if nodes:
+                return nodes
+        except Exception as e:
+            print(f"[Parser] Proxies block YAML parse warning: {e}")
+
+    # Strategy 2: Attempt full document YAML safe_load
     try:
-        data = yaml.safe_load(content)
-        if not isinstance(data, dict):
-            return []
-        proxies = data.get("proxies") or data.get("Proxy") or []
-        for p in proxies:
-            if not isinstance(p, dict):
-                continue
-            ptype = str(p.get("type", "")).lower()
-            if ptype not in ("vmess", "vless", "ss", "trojan", "hysteria2", "hy2", "tuic", "wireguard", "socks5"):
-                continue
-            node = {
-                "protocol": "hy2" if ptype in ("hysteria2", "hy2") else ptype,
-                "name": str(p.get("name", p.get("server", "Clash Node"))).strip(),
-                "address": str(p.get("server", "")).strip(),
-                "port": int(p.get("port", 0)),
-                "extra": {k: v for k, v in p.items() if k not in ("name", "server", "port", "type")},
-                "raw_config": None,
-            }
-            nodes.append(node)
+        data = yaml.safe_load(cleaned)
+        raw_list = []
+        if isinstance(data, dict):
+            raw_list = data.get("proxies") or data.get("Proxy") or data.get("payload") or []
+        elif isinstance(data, list):
+            raw_list = data
+        for p in raw_list:
+            item = _convert_proxy_dict(p)
+            if item:
+                nodes.append(item)
+        if nodes:
+            return nodes
     except Exception as e:
-        print(f"[Parser] Clash YAML error: {e}")
+        print(f"[Parser] Full document YAML parse warning: {e}")
+
+    # Strategy 3: Regex Flow-style: - { name: ..., server: ..., port: ..., type: ... }
+    flow_pattern = re.compile(r'-\s*\{([^}]+)\}')
+    for match in flow_pattern.finditer(cleaned):
+        inside = match.group(1)
+        p = {}
+        kv_pairs = re.findall(r'(\b[a-zA-Z0-9_\-]+)\s*:\s*([^,]+(?:\(.*?\))?)', inside)
+        for k, v in kv_pairs:
+            val = v.strip().strip("'\"")
+            if val.isdigit():
+                val = int(val)
+            p[k.strip()] = val
+        item = _convert_proxy_dict(p)
+        if item:
+            nodes.append(item)
+
+    if nodes:
+        return nodes
+
+    # Strategy 4: Regex Block-style: - name: ...\n  server: ...
+    blocks = re.split(r'\n\s*-\s+', cleaned)
+    for block in blocks[1:]:
+        p = {}
+        for line in block.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if ":" in line:
+                k, v = line.split(":", 1)
+                k = k.strip()
+                val = v.strip().strip("'\"")
+                if val.isdigit():
+                    val = int(val)
+                p[k] = val
+        item = _convert_proxy_dict(p)
+        if item:
+            nodes.append(item)
+
     return nodes
 
 
@@ -268,17 +380,18 @@ def _multi_layer_base64_decode(text: str) -> Optional[str]:
 
 
 def deduplicate_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Remove duplicate nodes by (protocol, address, port, auth_identifier)."""
+    """Remove duplicate nodes by (protocol, address, port, auth, name)."""
     seen = set()
     unique = []
     for n in nodes:
         addr = str(n.get("address", "")).lower().strip()
         port = str(n.get("port", 0))
         proto = str(n.get("protocol", "")).lower().strip()
+        name = str(n.get("name", "")).strip()
         extra = n.get("extra") or {}
         auth = str(extra.get("uuid") or extra.get("password") or extra.get("auth") or extra.get("method") or "").strip()
         
-        fingerprint = f"{proto}:{addr}:{port}:{auth}"
+        fingerprint = f"{proto}:{addr}:{port}:{auth}:{name}"
         if fingerprint not in seen and addr and port != "0":
             seen.add(fingerprint)
             unique.append(n)
@@ -287,11 +400,13 @@ def deduplicate_nodes(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def parse_subscription_content(content: str) -> List[Dict[str, Any]]:
     """Universal parser for all subscription/node content types."""
-    nodes = []
-    stripped = content.strip()
+    if not content or not content.strip():
+        return []
+    stripped = content.lstrip('\ufeff').strip()
 
-    # 1. Clash YAML (check if "proxies:" or "Proxy:" exists anywhere in text)
-    if "proxies:" in stripped or "Proxy:" in stripped:
+    # 1. Check if content looks like Clash YAML or list of proxies
+    lower = stripped.lower()
+    if any(k in lower for k in ("proxies:", "proxy:", "payload:")) or stripped.startswith("- ") or stripped.startswith("-\t"):
         yaml_nodes = parse_clash_yaml(stripped)
         if yaml_nodes:
             return deduplicate_nodes(yaml_nodes)
@@ -299,12 +414,14 @@ def parse_subscription_content(content: str) -> List[Dict[str, Any]]:
     # 2. Base64
     decoded = _multi_layer_base64_decode(stripped)
     lines_source = decoded if decoded else stripped
-    if "proxies:" in lines_source or "Proxy:" in lines_source:
+    lower_source = lines_source.lower()
+    if any(k in lower_source for k in ("proxies:", "proxy:", "payload:")) or lines_source.strip().startswith("- "):
         yaml_nodes = parse_clash_yaml(lines_source)
         if yaml_nodes:
             return deduplicate_nodes(yaml_nodes)
 
     # 3. Line-by-line parsing with per-line Base64 fallback
+    nodes = []
     for line in lines_source.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):

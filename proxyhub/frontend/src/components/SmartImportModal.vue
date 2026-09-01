@@ -230,21 +230,8 @@ async function handleSubmit() {
       })
       message.success('订阅已添加，正在后台拉取节点...')
     } else if (resultType.value === 'nodes') {
-      let count = 0
-      for (const node of parsedNodes.value) {
-        try {
-          await nodeApi.create({
-            name: node.name,
-            protocol: node.protocol,
-            address: node.address,
-            port: node.port,
-            raw_config: node.raw_config,
-            extra: node.extra,
-          })
-          count++
-        } catch (err) {}
-      }
-      message.success(`成功导入 ${count} 个节点！`)
+      const res = await nodeApi.batchCreate(parsedNodes.value)
+      message.success(res.data.message || `成功导入 ${parsedNodes.value.length} 个节点！`)
     }
 
     visible.value = false

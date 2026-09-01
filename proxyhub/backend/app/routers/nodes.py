@@ -138,6 +138,29 @@ async def create_node(
     return {"id": node.id, "message": "节点已添加"}
 
 
+class NodeBatchCreate(BaseModel):
+    nodes: List[NodeCreate]
+
+
+@router.post("/batch/create", status_code=201)
+async def batch_create_nodes(
+    body: NodeBatchCreate,
+    db: AsyncSession = Depends(get_db),
+    _: str = Depends(get_current_user),
+):
+    """Batch insert multiple nodes efficiently in a single transaction."""
+    created = []
+    for item in body.nodes:
+        node = Node(**item.model_dump())
+        node.tags = compute_smart_tags(node)
+        created.append(node)
+
+    if created:
+        db.add_all(created)
+        await db.commit()
+    return {"message": f"成功批量导入 {len(created)} 个节点", "count": len(created)}
+
+
 @router.post("/batch/rename")
 async def batch_rename_nodes(
     body: BatchActionRequest,

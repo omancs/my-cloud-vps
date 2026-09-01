@@ -51,6 +51,7 @@ export const subApi = {
 export const nodeApi = {
   list: (params) => api.get('/nodes/', { params }),
   create: (data) => api.post('/nodes/', data),
+  batchCreate: (nodes) => api.post('/nodes/batch/create', { nodes }),
   remove: (id) => api.delete(`/nodes/${id}`),
   batchDelete: (ids) => api.delete('/nodes/batch/delete', { data: ids }),
   batchRename: (node_ids = null) => api.post('/nodes/batch/rename', { node_ids }),
