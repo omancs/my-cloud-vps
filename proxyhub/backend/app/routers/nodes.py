@@ -52,26 +52,35 @@ async def list_nodes(
             (Node.name.ilike(f"%{search}%")) | (Node.address.ilike(f"%{search}%"))
         )
 
-    # Total count
-    count_q = select(func.count()).select_from(query.subquery())
-    total = (await db.execute(count_q)).scalar() or 0
-
     try:
-        query = query.order_by(Node.is_quarantined.asc(), Node.id.desc()).offset((page - 1) * page_size).limit(page_size)
-        result = await db.execute(query)
-        nodes = result.scalars().all()
-    except Exception:
-        # Fallback if is_quarantined column not indexed
-        query = select(Node).offset((page - 1) * page_size).limit(page_size)
-        result = await db.execute(query)
-        nodes = result.scalars().all()
+        # Total count
+        count_q = select(func.count()).select_from(query.subquery())
+        total = (await db.execute(count_q)).scalar() or 0
 
-    return {
-        "total": total,
-        "page": page,
-        "page_size": page_size,
-        "items": [_node_to_dict(n) for n in nodes],
-    }
+        try:
+            query = query.order_by(Node.id.desc()).offset((page - 1) * page_size).limit(page_size)
+            result = await db.execute(query)
+            nodes = result.scalars().all()
+        except Exception:
+            # Fallback if query fails
+            query = select(Node).offset((page - 1) * page_size).limit(page_size)
+            result = await db.execute(query)
+            nodes = result.scalars().all()
+
+        return {
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "items": [_node_to_dict(n) for n in nodes],
+        }
+    except Exception as e:
+        print(f"[Nodes] Error list_nodes: {e}")
+        return {
+            "total": 0,
+            "page": page,
+            "page_size": page_size,
+            "items": [],
+        }
 
 
 def _node_to_dict(n: Node) -> dict:

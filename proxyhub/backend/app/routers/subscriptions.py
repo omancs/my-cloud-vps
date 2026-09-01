@@ -76,22 +76,26 @@ async def list_subscriptions(
     db: AsyncSession = Depends(get_db),
     _: str = Depends(get_current_user),
 ):
-    result = await db.execute(select(Subscription).order_by(Subscription.created_at.desc()))
-    subs = result.scalars().all()
-    return [
-        {
-            "id": s.id,
-            "name": s.name or "未命名订阅",
-            "url": s.url,
-            "auto_refresh": s.auto_refresh,
-            "interval_minutes": s.interval_minutes,
-            "last_fetched": s.last_fetched,
-            "node_count": s.node_count,
-            "enabled": s.enabled,
-            "created_at": s.created_at,
-        }
-        for s in subs
-    ]
+    try:
+        result = await db.execute(select(Subscription).order_by(Subscription.id.desc()))
+        subs = result.scalars().all()
+        return [
+            {
+                "id": s.id,
+                "name": getattr(s, "name", "未命名订阅") or "未命名订阅",
+                "url": getattr(s, "url", ""),
+                "auto_refresh": getattr(s, "auto_refresh", True),
+                "interval_minutes": getattr(s, "interval_minutes", 360),
+                "last_fetched": getattr(s, "last_fetched", None),
+                "node_count": getattr(s, "node_count", 0),
+                "enabled": getattr(s, "enabled", True),
+                "created_at": getattr(s, "created_at", None),
+            }
+            for s in subs
+        ]
+    except Exception as e:
+        print(f"[Subscription] Error listing subscriptions: {e}")
+        return []
 
 
 @router.post("/", status_code=201)

@@ -15,16 +15,29 @@ from app.config import settings
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    await init_db()
+    # Startup with bulletproof error handling
+    try:
+        await init_db()
+    except Exception as e:
+        print(f"[DB] Init error: {e}")
+
     try:
         await ensure_mihomo_running()
     except Exception as e:
         print(f"[Mihomo] Init warning: {e}")
-    start_scheduler()
+
+    try:
+        start_scheduler()
+    except Exception as e:
+        print(f"[Scheduler] Warning: {e}")
+
     yield
+
     # Shutdown
-    stop_scheduler()
+    try:
+        stop_scheduler()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -37,7 +50,7 @@ app = FastAPI(
 # CORS — allow frontend dev server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:80", "*"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
