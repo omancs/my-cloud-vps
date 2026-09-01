@@ -1,8 +1,9 @@
 FROM node:20-alpine AS builder
 WORKDIR /app
 COPY package.json .
-RUN npm install
+RUN npm install --prefer-offline --no-audit
 COPY . .
+ENV NODE_OPTIONS="--max-old-space-size=512"
 RUN npm run build
 
 FROM nginx:alpine
