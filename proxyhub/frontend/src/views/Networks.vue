@@ -58,19 +58,63 @@
 
           <!-- Export buttons -->
           <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px">
-            <n-button size="small" type="primary" ghost @click="copySubLink(net, 'clash')">
+            <n-button size="small" type="primary" ghost @click="openSubModal(net, 'clash')">
               Clash (芙芙)
             </n-button>
-            <n-button size="small" type="info" ghost @click="copySubLink(net, 'singbox')">
+            <n-button size="small" type="info" ghost @click="openSubModal(net, 'singbox')">
               Sing-box
             </n-button>
-            <n-button size="small" secondary @click="copySubLink(net, 'v2ray')">
+            <n-button size="small" secondary @click="openSubModal(net, 'v2ray')">
               V2Ray
             </n-button>
           </div>
         </n-card>
       </n-gi>
     </n-grid>
+
+    <!-- Subscription QR Code & Copy Modal -->
+    <n-modal
+      v-model:show="showSubModal"
+      preset="card"
+      :title="subModalTitle"
+      style="max-width: 460px; width: 95vw; border-radius: 14px"
+    >
+      <div style="display: flex; flex-direction: column; align-items: center; text-align: center; gap: 14px">
+        <!-- QR Code -->
+        <div style="padding: 12px; background: #fff; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.06); border: 1px solid #eee">
+          <img
+            :src="qrCodeUrl"
+            alt="Subscription QR Code"
+            style="width: 190px; height: 190px; display: block; border-radius: 6px"
+          />
+        </div>
+        <n-text depth="3" style="font-size: 13px">
+          📱 手机客户端直接扫描二维码即可一键导入
+        </n-text>
+
+        <!-- Subscription URL Input -->
+        <div style="width: 100%; text-align: left">
+          <div style="font-weight: 600; font-size: 12px; margin-bottom: 6px; color: #666">专属订阅链接（已含安全 Token）：</div>
+          <n-input
+            :value="activeSubUrl"
+            readonly
+            type="textarea"
+            :rows="3"
+            style="font-family: monospace; font-size: 12px"
+          />
+        </div>
+
+        <!-- Buttons -->
+        <div style="display: flex; gap: 10px; width: 100%">
+          <n-button type="primary" block @click="copySubUrl">
+            📋 复制订阅链接
+          </n-button>
+          <n-button v-if="oneClickScheme" type="info" secondary block @click="openOneClickScheme">
+            🚀 一键导入客户端
+          </n-button>
+        </div>
+      </div>
+    </n-modal>
 
     <!-- Create Modal -->
     <n-modal v-model:show="showAdd" preset="card" title="创建聚合网络" style="max-width: 440px; width: 95vw; border-radius: 12px">
@@ -270,14 +314,81 @@ async function removeNodeFromNet(node) {
   }
 }
 
-function copySubLink(net, format) {
-  const tokenParam = net.token ? `?token=${net.token}` : ''
-  const url = `${window.location.origin}/subscribe/${net.id}/${format}${tokenParam}`
-  navigator.clipboard.writeText(url).then(() => {
-    message.success(`已复制 ${format.toUpperCase()} 专属订阅链接（已含安全 Token）`)
-  }).catch(() => {
-    message.info(`链接: ${url}`)
-  })
+const showSubModal = ref(false)
+const subModalNet = ref(null)
+const subModalFormat = ref('clash')
+
+const subModalTitle = computed(() => {
+  const name = subModalNet.value?.name || '聚合网络'
+  const formatMap = {
+    clash: 'Clash Meta (芙芙规则)',
+    singbox: 'Sing-box (JSON配置)',
+    v2ray: 'V2Ray (通用节点列表)',
+  }
+  return `【${name}】${formatMap[subModalFormat.value] || subModalFormat.value} 订阅`
+})
+
+const activeSubUrl = computed(() => {
+  if (!subModalNet.value) return ''
+  const tokenParam = subModalNet.value.token ? `?token=${subModalNet.value.token}` : ''
+  return `${window.location.origin}/subscribe/${subModalNet.value.id}/${subModalFormat.value}${tokenParam}`
+})
+
+const qrCodeUrl = computed(() => {
+  if (!activeSubUrl.value) return ''
+  return `https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=8&data=${encodeURIComponent(activeSubUrl.value)}`
+})
+
+const oneClickScheme = computed(() => {
+  if (!activeSubUrl.value) return null
+  if (subModalFormat.value === 'clash') {
+    return `clash://install-config?url=${encodeURIComponent(activeSubUrl.value)}`
+  }
+  if (subModalFormat.value === 'singbox') {
+    return `sing-box://import-remote-profile?url=${encodeURIComponent(activeSubUrl.value)}`
+  }
+  return null
+})
+
+function openSubModal(net, format) {
+  subModalNet.value = net
+  subModalFormat.value = format
+  showSubModal.value = true
+}
+
+function openOneClickScheme() {
+  if (oneClickScheme.value) {
+    window.location.href = oneClickScheme.value
+  }
+}
+
+function copySubUrl() {
+  const url = activeSubUrl.value
+  if (!url) return
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(url).then(() => {
+      message.success('已复制订阅链接到剪贴板！')
+    }).catch(() => fallbackCopy(url))
+  } else {
+    fallbackCopy(url)
+  }
+}
+
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.top = '-9999px'
+  document.body.appendChild(ta)
+  ta.focus()
+  ta.select()
+  try {
+    document.execCommand('copy')
+    message.success('已复制订阅链接到剪贴板！')
+  } catch (e) {
+    message.error('复制失败，请在输入框长按手动复制')
+  }
+  document.body.removeChild(ta)
 }
 
 onMounted(loadNetworks)

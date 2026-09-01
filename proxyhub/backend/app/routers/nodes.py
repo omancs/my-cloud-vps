@@ -54,11 +54,17 @@ async def list_nodes(
 
     # Total count
     count_q = select(func.count()).select_from(query.subquery())
-    total = (await db.execute(count_q)).scalar()
+    total = (await db.execute(count_q)).scalar() or 0
 
-    query = query.order_by(Node.is_quarantined.asc(), Node.latency_ms.asc().nullslast()).offset((page - 1) * page_size).limit(page_size)
-    result = await db.execute(query)
-    nodes = result.scalars().all()
+    try:
+        query = query.order_by(Node.is_quarantined.asc(), Node.id.desc()).offset((page - 1) * page_size).limit(page_size)
+        result = await db.execute(query)
+        nodes = result.scalars().all()
+    except Exception:
+        # Fallback if is_quarantined column not indexed
+        query = select(Node).offset((page - 1) * page_size).limit(page_size)
+        result = await db.execute(query)
+        nodes = result.scalars().all()
 
     return {
         "total": total,
@@ -69,6 +75,18 @@ async def list_nodes(
 
 
 def _node_to_dict(n: Node) -> dict:
+    import json
+    raw_tags = getattr(n, "tags", None)
+    if isinstance(raw_tags, list):
+        tags = raw_tags
+    elif isinstance(raw_tags, str):
+        try:
+            tags = json.loads(raw_tags)
+        except Exception:
+            tags = []
+    else:
+        tags = []
+
     return {
         "id": n.id,
         "subscription_id": n.subscription_id,
@@ -77,23 +95,23 @@ def _node_to_dict(n: Node) -> dict:
         "address": n.address,
         "port": n.port,
         "enabled": n.enabled,
-        "latency_ms": n.latency_ms,
-        "real_latency_ms": n.real_latency_ms,
-        "download_speed": n.download_speed,
-        "status": n.status,
-        "ip_address": n.ip_address,
-        "ip_country": n.ip_country,
-        "ip_org": n.ip_org,
-        "is_residential": n.is_residential,
-        "netflix_unlock": n.netflix_unlock,
-        "openai_unlock": n.openai_unlock,
+        "latency_ms": getattr(n, "latency_ms", None),
+        "real_latency_ms": getattr(n, "real_latency_ms", None),
+        "download_speed": getattr(n, "download_speed", None),
+        "status": getattr(n, "status", "unknown"),
+        "ip_address": getattr(n, "ip_address", None),
+        "ip_country": getattr(n, "ip_country", None),
+        "ip_org": getattr(n, "ip_org", None),
+        "is_residential": getattr(n, "is_residential", False),
+        "netflix_unlock": getattr(n, "netflix_unlock", False),
+        "openai_unlock": getattr(n, "openai_unlock", False),
         "youtube_unlock": getattr(n, "youtube_unlock", False),
-        "purity_status": n.purity_status,
-        "fail_count": getattr(n, "fail_count", 0),
-        "is_quarantined": getattr(n, "is_quarantined", False),
-        "tags": getattr(n, "tags", []) or [],
-        "last_tested": n.last_tested,
-        "created_at": n.created_at,
+        "purity_status": getattr(n, "purity_status", "unknown"),
+        "fail_count": getattr(n, "fail_count", 0) or 0,
+        "is_quarantined": bool(getattr(n, "is_quarantined", False)),
+        "tags": tags,
+        "last_tested": getattr(n, "last_tested", None),
+        "created_at": getattr(n, "created_at", None),
     }
 
 

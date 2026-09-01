@@ -224,10 +224,14 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
     nodes = []
     try:
         data = yaml.safe_load(content)
-        proxies = data.get("proxies", []) or []
+        if not isinstance(data, dict):
+            return []
+        proxies = data.get("proxies") or data.get("Proxy") or []
         for p in proxies:
+            if not isinstance(p, dict):
+                continue
             ptype = str(p.get("type", "")).lower()
-            if ptype not in ("vmess", "vless", "ss", "trojan", "hysteria2", "hy2"):
+            if ptype not in ("vmess", "vless", "ss", "trojan", "hysteria2", "hy2", "tuic", "wireguard", "socks5"):
                 continue
             node = {
                 "protocol": "hy2" if ptype in ("hysteria2", "hy2") else ptype,
@@ -238,8 +242,8 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
                 "raw_config": None,
             }
             nodes.append(node)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Parser] Clash YAML error: {e}")
     return nodes
 
 
@@ -253,8 +257,7 @@ def _multi_layer_base64_decode(text: str) -> Optional[str]:
             padded = variant + "=" * (-len(variant) % 4)
             try:
                 decoded = base64.b64decode(padded).decode("utf-8")
-                if any(decoded.lstrip().startswith(p) for p in
-                       ("vmess://", "vless://", "ss://", "trojan://", "hy2://", "hysteria2://", "proxies:")):
+                if any(k in decoded.lower() for k in ("vmess://", "vless://", "ss://", "trojan://", "hy2://", "hysteria2://", "proxies:")):
                     return decoded
                 if re.match(r'^[A-Za-z0-9+/\-_=\n\r]+$', decoded.strip()) and len(decoded.strip()) > 10:
                     candidate = decoded.strip()
@@ -287,16 +290,19 @@ def parse_subscription_content(content: str) -> List[Dict[str, Any]]:
     nodes = []
     stripped = content.strip()
 
-    # 1. Clash YAML
-    if stripped.startswith("proxies:") or "\nproxies:" in stripped:
-        nodes = parse_clash_yaml(stripped)
-        return deduplicate_nodes(nodes)
+    # 1. Clash YAML (check if "proxies:" or "Proxy:" exists anywhere in text)
+    if "proxies:" in stripped or "Proxy:" in stripped:
+        yaml_nodes = parse_clash_yaml(stripped)
+        if yaml_nodes:
+            return deduplicate_nodes(yaml_nodes)
 
     # 2. Base64
     decoded = _multi_layer_base64_decode(stripped)
     lines_source = decoded if decoded else stripped
-    if lines_source.strip().startswith("proxies:") or "\nproxies:" in lines_source:
-        return deduplicate_nodes(parse_clash_yaml(lines_source))
+    if "proxies:" in lines_source or "Proxy:" in lines_source:
+        yaml_nodes = parse_clash_yaml(lines_source)
+        if yaml_nodes:
+            return deduplicate_nodes(yaml_nodes)
 
     # 3. Line-by-line parsing with per-line Base64 fallback
     for line in lines_source.splitlines():

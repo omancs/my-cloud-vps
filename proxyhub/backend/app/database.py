@@ -40,7 +40,6 @@ async def get_db():
 
 def _migrate_sqlite_schema(sync_conn):
     """Synchronously inspect and auto-add missing columns to existing SQLite tables."""
-    # List of (table_name, column_name, column_def_sql)
     required_columns = [
         # networks
         ("networks", "token", "TEXT DEFAULT ''"),
@@ -68,14 +67,12 @@ def _migrate_sqlite_schema(sync_conn):
         ("subscriptions", "auto_refresh", "BOOLEAN DEFAULT 1"),
     ]
 
-    # Check which tables exist
     res = sync_conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))
     existing_tables = {row[0] for row in res.fetchall()}
 
     for table, column, col_type in required_columns:
         if table not in existing_tables:
             continue
-        # Check if column exists
         info_res = sync_conn.execute(text(f"PRAGMA table_info({table})"))
         existing_cols = {row[1] for row in info_res.fetchall()}
         if column not in existing_cols:
@@ -84,6 +81,15 @@ def _migrate_sqlite_schema(sync_conn):
                 print(f"[DB Migration] Added missing column: {table}.{column}")
             except Exception as e:
                 print(f"[DB Migration] Warning adding {table}.{column}: {e}")
+
+    # Fix NULL values in nodes table for new columns
+    if "nodes" in existing_tables:
+        try:
+            sync_conn.execute(text("UPDATE nodes SET is_quarantined = 0 WHERE is_quarantined IS NULL"))
+            sync_conn.execute(text("UPDATE nodes SET fail_count = 0 WHERE fail_count IS NULL"))
+            sync_conn.execute(text("UPDATE nodes SET tags = '[]' WHERE tags IS NULL OR tags = ''"))
+        except Exception:
+            pass
 
     # Ensure all existing networks have a non-empty token
     if "networks" in existing_tables:
@@ -104,8 +110,6 @@ def _migrate_sqlite_schema(sync_conn):
 async def init_db():
     from app.models import subscription, node, network, test_result, traffic, rule  # noqa: F401
     async with engine.begin() as conn:
-        # Create all tables that don't exist yet
         await conn.run_sync(Base.metadata.create_all)
-        # Auto migrate existing SQLite tables to add new columns
         await conn.run_sync(_migrate_sqlite_schema)
     print("[Database] Initialized and auto-migrated successfully.")

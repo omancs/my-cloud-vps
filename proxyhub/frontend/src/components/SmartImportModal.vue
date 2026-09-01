@@ -11,10 +11,20 @@
         💡 <b>支持粘贴任意内容</b>：订阅链接（HTTP/HTTPS）、节点 URI 列表（vmess/vless/ss/trojan/hy2）、Base64 密文或 Clash YAML 配置，系统自动识别！
       </n-alert>
 
-      <div style="display: flex; gap: 8px">
-        <n-button type="primary" secondary block @click="pasteFromClipboard">
+      <div style="display: flex; gap: 8px; flex-wrap: wrap">
+        <n-button type="primary" secondary style="flex: 1; min-width: 140px" @click="pasteFromClipboard">
           📋 从剪贴板一键读取
         </n-button>
+        <n-upload
+          :show-file-list="false"
+          accept=".yaml,.yml,.txt,.json,.conf"
+          :custom-request="handleFileUpload"
+          style="flex: 1; min-width: 140px"
+        >
+          <n-button secondary type="info" block>
+            📁 上传本地 YAML/文本文件
+          </n-button>
+        </n-upload>
         <n-button v-if="rawText" @click="clearInput">
           清空
         </n-button>
@@ -93,7 +103,7 @@
 import { ref, computed } from 'vue'
 import {
   NModal, NSpace, NAlert, NButton, NInput, NSpin, NTag, NForm,
-  NFormItem, NSwitch, NScrollbar, NList, NListItem, useMessage,
+  NFormItem, NSwitch, NScrollbar, NList, NListItem, NUpload, useMessage,
 } from 'naive-ui'
 import { rulesApi, subApi, nodeApi } from '../api'
 
@@ -103,6 +113,16 @@ const props = defineProps({
 const emit = defineEmits(['update:show', 'imported'])
 
 const message = useMessage()
+
+function handleFileUpload({ file }) {
+  const reader = new FileReader()
+  reader.onload = (e) => {
+    rawText.value = e.target.result
+    message.success(`已读取文件【${file.name}】，正在智能识别节点...`)
+    onTextInput()
+  }
+  reader.readAsText(file.file)
+}
 
 const visible = computed({
   get: () => props.show,
