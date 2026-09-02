@@ -22,7 +22,7 @@
           style="flex: 1; min-width: 140px"
         >
           <n-button secondary type="info" block>
-            📁 上传本地 YAML/文本文件
+            📁 上传本地文件（YAML/TXT/JSON）
           </n-button>
         </n-upload>
         <n-button v-if="rawText" @click="clearInput">
