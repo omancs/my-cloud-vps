@@ -35,16 +35,8 @@ def _node_to_clash_proxy(node: Dict[str, Any]) -> Dict[str, Any] | None:
     if not address or port <= 0:
         return None
 
-    # If extra already contains rich Clash proxy dictionary, reuse directly
-    if "type" in extra and any(k in extra for k in ("uuid", "password", "auth", "method")):
-        p = dict(extra)
-        p["name"] = name
-        p["server"] = address
-        p["port"] = port
-        p["udp"] = True
-        if protocol in ("hy2", "hysteria2"):
-            p["type"] = "hysteria2"
-        return p
+    # Note: extra["type"] is the TRANSPORT type (tcp/ws/grpc), NOT the proxy protocol.
+    # Always use the explicit protocol-based conversion below.
 
     if protocol == "vmess":
         p = {
