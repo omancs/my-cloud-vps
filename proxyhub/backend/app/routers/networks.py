@@ -341,6 +341,19 @@ async def _get_validated_network_nodes(network_id: int, token: Optional[str], db
     return net, node_dicts
 
 
+def _make_sub_headers(filename: str, net_name: str) -> dict:
+    import urllib.parse
+    import base64
+    encoded_fn = urllib.parse.quote(filename)
+    b64_title = base64.b64encode(net_name.encode("utf-8")).decode("utf-8")
+    return {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_fn}",
+        "Profile-Title": f"base64:{b64_title}",
+        "Subscription-Userinfo": "upload=0; download=0; total=1073741824000; expire=0",
+        "Profile-Update-Interval": "24",
+    }
+
+
 @subscribe_router.get("/{network_id}/clash")
 async def subscribe_clash(
     network_id: int,
@@ -363,10 +376,7 @@ async def subscribe_clash(
     ]
 
     content = build_clash_subscription(nodes, custom_rules, network_name=net.name)
-    headers = {
-        "Content-Disposition": f'attachment; filename="{net.name}.yaml"',
-        "profile-title": net.name,
-    }
+    headers = _make_sub_headers(f"{net.name}.yaml", net.name)
     return PlainTextResponse(content, media_type="text/yaml; charset=utf-8", headers=headers)
 
 
@@ -380,10 +390,7 @@ async def subscribe_singbox(
 
     net, nodes = await _get_validated_network_nodes(network_id, token, db)
     content = export_singbox(nodes)
-    headers = {
-        "Content-Disposition": f'attachment; filename="{net.name}.json"',
-        "profile-title": net.name,
-    }
+    headers = _make_sub_headers(f"{net.name}.json", net.name)
     return PlainTextResponse(content, media_type="application/json; charset=utf-8", headers=headers)
 
 
@@ -397,8 +404,5 @@ async def subscribe_v2ray(
 
     net, nodes = await _get_validated_network_nodes(network_id, token, db)
     content = export_v2ray(nodes)
-    headers = {
-        "Content-Disposition": f'attachment; filename="{net.name}.txt"',
-        "profile-title": net.name,
-    }
+    headers = _make_sub_headers(f"{net.name}.txt", net.name)
     return PlainTextResponse(content, media_type="text/plain; charset=utf-8", headers=headers)

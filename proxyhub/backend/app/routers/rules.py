@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from pydantic import BaseModel
@@ -148,4 +148,31 @@ async def parse_nodes_from_text(
         "count": len(nodes),
         "nodes": nodes,
     }
+
+
+@router.post("/parse-file")
+async def parse_nodes_from_file(
+    file: UploadFile = File(...),
+    _: str = Depends(get_current_user),
+):
+    """
+    Parse nodes directly from an uploaded file (YAML, txt, json, conf)
+    Supports large files (up to 50MB) without text payload limits.
+    """
+    from fastapi import UploadFile
+    content_bytes = await file.read()
+    try:
+        raw = content_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        raw = content_bytes.decode("latin-1", errors="ignore")
+
+    nodes = parse_text_or_base64(raw)
+    return {
+        "type": "nodes",
+        "url": None,
+        "auto_name": file.filename,
+        "count": len(nodes),
+        "nodes": nodes,
+    }
+
 

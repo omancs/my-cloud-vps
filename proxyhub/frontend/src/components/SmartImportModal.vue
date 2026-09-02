@@ -114,14 +114,30 @@ const emit = defineEmits(['update:show', 'imported'])
 
 const message = useMessage()
 
-function handleFileUpload({ file }) {
-  const reader = new FileReader()
-  reader.onload = (e) => {
-    rawText.value = e.target.result
-    message.success(`已读取文件【${file.name}】，正在智能识别节点...`)
-    onTextInput()
+async function handleFileUpload({ file }) {
+  analyzing.value = true
+  resultType.value = null
+  parsedNodes.value = []
+  rawText.value = `[本地文件: ${file.name} (${(file.file.size / 1024).toFixed(1)} KB)]`
+  message.info(`正在解析文件【${file.name}】...`)
+  try {
+    const res = await rulesApi.parseFile(file.file)
+    resultType.value = res.data.type
+    if (res.data.type === 'nodes') {
+      parsedNodes.value = res.data.nodes || []
+      message.success(`成功识别到 ${parsedNodes.value.length} 个节点！`)
+    } else if (res.data.type === 'subscription_url') {
+      subUrl.value = res.data.url
+      subName.value = res.data.auto_name || file.name
+      parsedNodes.value = []
+    }
+  } catch (e) {
+    message.error(e.response?.data?.detail || '文件解析失败，请检查格式')
+    resultType.value = null
+    parsedNodes.value = []
+  } finally {
+    analyzing.value = false
   }
-  reader.readAsText(file.file)
 }
 
 const visible = computed({

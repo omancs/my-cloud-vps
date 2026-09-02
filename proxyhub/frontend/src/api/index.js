@@ -110,4 +110,9 @@ export const rulesApi = {
   remove: (id) => api.delete(`/rules/${id}`),
   batchDelete: (ids) => api.delete('/rules/batch/delete', { data: ids }),
   parseText: (text) => api.post('/rules/parse-text', { text }),
+  parseFile: (file) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    return api.post('/rules/parse-file', fd)
+  },
 }

@@ -269,7 +269,11 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
     # Strategy 1: Extract proxies block lines only
     proxy_block_lines = []
     in_proxies = False
-    base_indent = 0
+    stop_sections = (
+        "proxy-groups:", "proxy-providers:", "rules:", "rule-providers:",
+        "dns:", "tun:", "sniffer:", "script:", "hosts:", "sub-rules:", "routing:"
+    )
+
     for line in cleaned.splitlines():
         stripped = line.strip()
         lower = stripped.lower()
@@ -277,13 +281,15 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
             if lower in ("proxies:", "proxy:", "payload:") or lower.startswith("proxies:") or lower.startswith("proxy:"):
                 in_proxies = True
                 proxy_block_lines.append(line)
-                base_indent = len(line) - len(line.lstrip())
         else:
-            current_indent = len(line) - len(line.lstrip())
-            if stripped and not stripped.startswith("-") and not stripped.startswith("#") and current_indent <= base_indent:
+            # Stop if we hit any subsequent top-level Clash section
+            if any(lower.startswith(sec) for sec in stop_sections):
                 break
             proxy_block_lines.append(line)
 
+    target_text = "\n".join(proxy_block_lines) if proxy_block_lines else cleaned
+
+    # Strategy 1: Attempt PyYAML safe_load on isolated proxies block
     if proxy_block_lines:
         try:
             proxies_yaml = "\n".join(proxy_block_lines)
@@ -302,9 +308,9 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
         except Exception as e:
             print(f"[Parser] Proxies block YAML parse warning: {e}")
 
-    # Strategy 2: Attempt full document YAML safe_load
+    # Strategy 2: Attempt PyYAML safe_load on target text
     try:
-        data = yaml.safe_load(cleaned)
+        data = yaml.safe_load(target_text)
         raw_list = []
         if isinstance(data, dict):
             raw_list = data.get("proxies") or data.get("Proxy") or data.get("payload") or []
@@ -317,11 +323,11 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
         if nodes:
             return nodes
     except Exception as e:
-        print(f"[Parser] Full document YAML parse warning: {e}")
+        print(f"[Parser] Target text YAML parse warning: {e}")
 
-    # Strategy 3: Regex Flow-style: - { name: ..., server: ..., port: ..., type: ... }
+    # Strategy 3: Regex Flow-style on target_text ONLY (never on rules!)
     flow_pattern = re.compile(r'-\s*\{([^}]+)\}')
-    for match in flow_pattern.finditer(cleaned):
+    for match in flow_pattern.finditer(target_text):
         inside = match.group(1)
         p = {}
         kv_pairs = re.findall(r'(\b[a-zA-Z0-9_\-]+)\s*:\s*([^,]+(?:\(.*?\))?)', inside)
@@ -337,9 +343,11 @@ def parse_clash_yaml(content: str) -> List[Dict[str, Any]]:
     if nodes:
         return nodes
 
-    # Strategy 4: Regex Block-style: - name: ...\n  server: ...
-    blocks = re.split(r'\n\s*-\s+', cleaned)
-    for block in blocks[1:]:
+    # Strategy 4: Regex Block-style on target_text ONLY
+    blocks = re.split(r'\n\s*-\s+', target_text)
+    for block in blocks:
+        if not block.strip():
+            continue
         p = {}
         for line in block.splitlines():
             line = line.strip()

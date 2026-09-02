@@ -2,11 +2,12 @@
 Export nodes to:
 - Clash YAML / Mihomo (芙芙 rule-set template)
 - Sing-box 1.10+ JSON (modern universal format)
-- V2Ray / Base64 URI list
+- V2Ray / Base64 URI list (auto generates URI if raw_config is None)
 Excludes quarantined (dead) nodes automatically.
 """
 import base64
 import json
+import urllib.parse
 from typing import List, Dict, Any, Optional
 import yaml
 
@@ -22,55 +23,101 @@ def _node_to_clash_proxy(node: Dict[str, Any]) -> Dict[str, Any] | None:
     if not _is_usable(node):
         return None
 
-    protocol = node["protocol"]
-    extra = node.get("extra") or {}
-    name = node["name"]
-    address = node["address"]
-    port = node["port"]
+    protocol = str(node.get("protocol", "")).lower().strip()
+    extra = dict(node.get("extra") or {})
+    name = str(node.get("name") or "Proxy Node").strip()
+    address = str(node.get("address") or "").strip()
+    try:
+        port = int(node.get("port") or 0)
+    except Exception:
+        port = 0
+
+    if not address or port <= 0:
+        return None
+
+    # If extra already contains rich Clash proxy dictionary, reuse directly
+    if "type" in extra and any(k in extra for k in ("uuid", "password", "auth", "method")):
+        p = dict(extra)
+        p["name"] = name
+        p["server"] = address
+        p["port"] = port
+        p["udp"] = True
+        if protocol in ("hy2", "hysteria2"):
+            p["type"] = "hysteria2"
+        return p
 
     if protocol == "vmess":
-        return {
+        p = {
             "name": name, "type": "vmess", "server": address, "port": port,
-            "uuid": extra.get("uuid", ""),
+            "uuid": str(extra.get("uuid", "")).strip(),
             "alterId": int(extra.get("alterId", 0)),
-            "cipher": extra.get("security", "auto"),
-            "network": extra.get("network", "tcp"),
-            "tls": extra.get("tls") == "tls",
-            "ws-opts": {"path": extra.get("path", "/"), "headers": {"Host": extra.get("host", "")}},
-            "servername": extra.get("sni", ""),
+            "cipher": extra.get("security", extra.get("cipher", "auto")),
+            "network": extra.get("network", extra.get("net", "tcp")),
+            "tls": extra.get("tls") in (True, "tls", "1"),
+            "udp": True,
         }
+        sni = extra.get("sni") or extra.get("host") or ""
+        if sni:
+            p["servername"] = sni
+        net_type = str(p["network"]).lower()
+        if net_type == "ws":
+            p["ws-opts"] = {"path": extra.get("path", "/"), "headers": {"Host": extra.get("host", sni)}}
+        elif net_type == "grpc":
+            p["grpc-opts"] = {"grpc-service-name": extra.get("serviceName", extra.get("path", ""))}
+        return p
+
     elif protocol == "vless":
+        flow = str(extra.get("flow", "")).strip()
+        sec = str(extra.get("security", "")).strip()
         p = {
             "name": name, "type": "vless", "server": address, "port": port,
-            "uuid": extra.get("uuid", ""),
-            "network": extra.get("type", "tcp"),
-            "tls": extra.get("security") in ("tls", "reality"),
-            "servername": extra.get("sni", ""),
+            "uuid": str(extra.get("uuid", "")).strip(),
+            "network": extra.get("type", extra.get("network", "tcp")),
+            "tls": sec in ("tls", "reality") or extra.get("tls") in (True, "tls", "1"),
+            "udp": True,
         }
-        if extra.get("security") == "reality":
+        sni = extra.get("sni") or extra.get("host") or ""
+        if sni:
+            p["servername"] = sni
+            p["client-fingerprint"] = extra.get("fp", "chrome")
+        if sec == "reality" or "pbk" in extra:
             p["reality-opts"] = {
                 "public-key": extra.get("pbk", ""),
                 "short-id": extra.get("sid", ""),
             }
+            p["client-fingerprint"] = extra.get("fp", "chrome")
+            p["flow"] = flow or "xtls-rprx-vision"
+        elif flow:
+            p["flow"] = flow
         return p
-    elif protocol == "ss":
+
+    elif protocol in ("ss", "shadowsocks"):
         return {
             "name": name, "type": "ss", "server": address, "port": port,
-            "cipher": extra.get("method", "aes-256-gcm"),
-            "password": extra.get("password", ""),
+            "cipher": extra.get("method", extra.get("cipher", "aes-256-gcm")),
+            "password": str(extra.get("password", "")),
+            "udp": True,
         }
+
     elif protocol == "trojan":
         return {
             "name": name, "type": "trojan", "server": address, "port": port,
-            "password": extra.get("password", ""),
+            "password": str(extra.get("password", "")),
             "sni": extra.get("sni", address),
+            "skip-cert-verify": extra.get("insecure") in (True, "1", "true"),
+            "network": extra.get("type", extra.get("network", "tcp")),
+            "udp": True,
         }
-    elif protocol == "hy2":
+
+    elif protocol in ("hy2", "hysteria2"):
         return {
             "name": name, "type": "hysteria2", "server": address, "port": port,
-            "password": extra.get("auth", extra.get("password", "")),
+            "password": str(extra.get("auth", extra.get("password", ""))),
             "sni": extra.get("sni", ""),
+            "skip-cert-verify": extra.get("insecure") in (True, "1", "true"),
+            "udp": True,
         }
+
     return None
 
 
@@ -78,33 +125,48 @@ def _node_to_singbox_outbound(node: Dict[str, Any]) -> Dict[str, Any] | None:
     if not _is_usable(node):
         return None
 
-    protocol = node["protocol"]
-    extra = node.get("extra") or {}
-    name = str(node["name"])
-    address = node["address"]
-    port = int(node["port"])
+    protocol = str(node.get("protocol", "")).lower().strip()
+    extra = dict(node.get("extra") or {})
+    name = str(node.get("name") or "Node").strip()
+    address = str(node.get("address") or "").strip()
+    try:
+        port = int(node.get("port") or 0)
+    except Exception:
+        port = 0
+
+    if not address or port <= 0:
+        return None
 
     if protocol == "vless":
+        sec = str(extra.get("security", "")).strip()
         ob = {
             "type": "vless",
             "tag": name,
             "server": address,
             "server_port": port,
-            "uuid": extra.get("uuid", ""),
+            "uuid": str(extra.get("uuid", "")).strip(),
+            "flow": extra.get("flow") or ("xtls-rprx-vision" if sec == "reality" or "pbk" in extra else ""),
         }
-        sec = extra.get("security", "")
-        if sec == "reality":
+        if not ob["flow"]:
+            del ob["flow"]
+
+        if sec == "reality" or "pbk" in extra:
             ob["tls"] = {
                 "enabled": True,
                 "server_name": extra.get("sni", address),
+                "utls": {"enabled": True, "fingerprint": extra.get("fp", "chrome")},
                 "reality": {
                     "enabled": True,
                     "public_key": extra.get("pbk", ""),
                     "short_id": extra.get("sid", ""),
-                }
+                },
             }
-        elif sec == "tls":
-            ob["tls"] = {"enabled": True, "server_name": extra.get("sni", address)}
+        elif sec == "tls" or extra.get("tls"):
+            ob["tls"] = {
+                "enabled": True,
+                "server_name": extra.get("sni", address),
+                "utls": {"enabled": True, "fingerprint": extra.get("fp", "chrome")},
+            }
         return ob
 
     elif protocol == "vmess":
@@ -113,20 +175,23 @@ def _node_to_singbox_outbound(node: Dict[str, Any]) -> Dict[str, Any] | None:
             "tag": name,
             "server": address,
             "server_port": port,
-            "uuid": extra.get("uuid", ""),
+            "uuid": str(extra.get("uuid", "")).strip(),
             "security": "auto",
             "alter_id": int(extra.get("alterId", 0)),
-            "tls": {"enabled": extra.get("tls") == "tls", "server_name": extra.get("sni", address)},
+            "tls": {
+                "enabled": extra.get("tls") in (True, "tls", "1"),
+                "server_name": extra.get("sni", address),
+            },
         }
 
-    elif protocol == "ss":
+    elif protocol in ("ss", "shadowsocks"):
         return {
             "type": "shadowsocks",
             "tag": name,
             "server": address,
             "server_port": port,
-            "method": extra.get("method", "aes-256-gcm"),
-            "password": extra.get("password", ""),
+            "method": extra.get("method", extra.get("cipher", "aes-256-gcm")),
+            "password": str(extra.get("password", "")),
         }
 
     elif protocol == "trojan":
@@ -135,25 +200,102 @@ def _node_to_singbox_outbound(node: Dict[str, Any]) -> Dict[str, Any] | None:
             "tag": name,
             "server": address,
             "server_port": port,
-            "password": extra.get("password", ""),
+            "password": str(extra.get("password", "")),
             "tls": {"enabled": True, "server_name": extra.get("sni", address)},
         }
 
-    elif protocol == "hy2":
+    elif protocol in ("hy2", "hysteria2"):
         return {
             "type": "hysteria2",
             "tag": name,
             "server": address,
             "server_port": port,
-            "password": extra.get("auth", extra.get("password", "")),
-            "tls": {"enabled": True, "server_name": extra.get("sni", address)},
+            "password": str(extra.get("auth", extra.get("password", ""))),
+            "tls": {
+                "enabled": True,
+                "server_name": extra.get("sni", address),
+                "insecure": extra.get("insecure") in (True, "1", "true"),
+            },
         }
 
     return None
 
 
+def _node_to_uri(node: Dict[str, Any]) -> str | None:
+    """Generate a standard proxy URI for a node."""
+    raw = node.get("raw_config")
+    if raw and isinstance(raw, str) and "://" in raw:
+        return raw.strip()
+
+    protocol = str(node.get("protocol", "")).lower().strip()
+    extra = dict(node.get("extra") or {})
+    name = str(node.get("name") or "Node").strip()
+    address = str(node.get("address") or "").strip()
+    port = int(node.get("port") or 0)
+    if not address or port <= 0:
+        return None
+
+    safe_name = urllib.parse.quote(name)
+
+    if protocol == "vless":
+        uuid = extra.get("uuid", "")
+        sec = extra.get("security", "none")
+        flow = extra.get("flow", "")
+        sni = extra.get("sni", "")
+        pbk = extra.get("pbk", "")
+        sid = extra.get("sid", "")
+        net_type = extra.get("type", extra.get("network", "tcp"))
+        params = f"type={net_type}&security={sec}"
+        if sni:
+            params += f"&sni={sni}"
+        if flow:
+            params += f"&flow={flow}"
+        if pbk:
+            params += f"&pbk={pbk}"
+        if sid:
+            params += f"&sid={sid}"
+        return f"vless://{uuid}@{address}:{port}?{params}#{safe_name}"
+
+    elif protocol == "vmess":
+        v_data = {
+            "v": "2",
+            "ps": name,
+            "add": address,
+            "port": str(port),
+            "id": extra.get("uuid", ""),
+            "aid": str(extra.get("alterId", 0)),
+            "scy": extra.get("security", "auto"),
+            "net": extra.get("network", "tcp"),
+            "type": "none",
+            "host": extra.get("host", ""),
+            "path": extra.get("path", "/"),
+            "tls": "tls" if extra.get("tls") in (True, "tls", "1") else "",
+            "sni": extra.get("sni", ""),
+        }
+        b64 = base64.b64encode(json.dumps(v_data).encode("utf-8")).decode("utf-8")
+        return f"vmess://{b64}"
+
+    elif protocol in ("ss", "shadowsocks"):
+        method = extra.get("method", extra.get("cipher", "aes-256-gcm"))
+        password = extra.get("password", "")
+        userinfo = base64.b64encode(f"{method}:{password}".encode("utf-8")).decode("utf-8")
+        return f"ss://{userinfo}@{address}:{port}#{safe_name}"
+
+    elif protocol == "trojan":
+        password = extra.get("password", "")
+        sni = extra.get("sni", address)
+        return f"trojan://{password}@{address}:{port}?sni={sni}#{safe_name}"
+
+    elif protocol in ("hy2", "hysteria2"):
+        password = extra.get("auth", extra.get("password", ""))
+        sni = extra.get("sni", "")
+        return f"hysteria2://{password}@{address}:{port}?sni={sni}&insecure=1#{safe_name}"
+
+    return None
+
+
 def export_clash(nodes: List[Dict[str, Any]]) -> str:
-    """Export nodes as Clash YAML subscription (auto filters dead quarantined nodes)."""
+    """Export nodes as standard Clash YAML subscription."""
     proxies = []
     names = []
     for node in nodes:
@@ -183,6 +325,8 @@ def export_clash(nodes: List[Dict[str, Any]]) -> str:
             }
         ],
         "rules": [
+            "GEOIP,LAN,DIRECT",
+            "GEOIP,CN,DIRECT",
             "MATCH,PROXY",
         ]
     }
@@ -205,8 +349,8 @@ def export_singbox(nodes: List[Dict[str, Any]]) -> str:
         "log": {"level": "info"},
         "dns": {
             "servers": [
-                {"tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "Proxy"},
-                {"tag": "dns-direct", "address": "223.5.5.5", "detour": "direct"}
+                {"tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "strategy": "prefer_ipv4"},
+                {"tag": "dns-direct", "address": "223.5.5.5", "strategy": "prefer_ipv4", "detour": "direct"}
             ]
         },
         "inbounds": [
@@ -216,7 +360,7 @@ def export_singbox(nodes: List[Dict[str, Any]]) -> str:
             {
                 "type": "selector",
                 "tag": "Proxy",
-                "outbounds": ["Auto"] + tags if tags else ["direct"],
+                "outbounds": (["Auto"] + tags) if tags else ["direct"],
             },
             {
                 "type": "urltest",
@@ -244,12 +388,12 @@ def export_singbox(nodes: List[Dict[str, Any]]) -> str:
 
 
 def export_v2ray(nodes: List[Dict[str, Any]]) -> str:
-    """Export nodes as base64-encoded URI list (V2Ray/Xray subscription)."""
+    """Export nodes as base64-encoded URI list (V2Ray/Xray/Shadowrocket subscription)."""
     uris = []
     for node in nodes:
         if _is_usable(node):
-            raw = node.get("raw_config")
-            if raw:
-                uris.append(raw)
+            uri = _node_to_uri(node)
+            if uri:
+                uris.append(uri)
     content = "\n".join(uris)
     return base64.b64encode(content.encode("utf-8")).decode("utf-8")
